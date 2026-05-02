@@ -1,0 +1,30 @@
+# ROS
+build/
+devel/
+install/
+*.pyc
+__pycache__/
+*.egg-info/
+
+# Gazebo
+.gazebo/
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+*.o
+*.a
+*.so
+CMakeCache.txt
+cmake_install.cmake
+Makefile
