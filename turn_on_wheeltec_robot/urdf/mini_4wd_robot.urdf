@@ -11,6 +11,17 @@
                 <color rgba="1 1 1 1"/>
             </material>
         </visual>
+        <inertial>
+            <mass>1.0</mass>
+            <inertia>
+                <ixx>0.01</ixx>
+                <iyy>0.01</iyy>
+                <izz>0.01</izz>
+                <ixy>0.0</ixy>
+                <ixz>0.0</ixz>
+                <iyz>0.0</iyz>
+            </inertia>
+        </inertial>
     </link>   
 
     <joint name="left_wheel_joint" type="continuous">
@@ -30,6 +41,17 @@
                 <color rgba="0 0 0 1"/>
             </material>
         </visual>
+        <inertial>
+            <mass>0.1</mass>
+            <inertia>
+                <ixx>0.0005</ixx>
+                <iyy>0.0005</iyy>
+                <izz>0.0005</izz>
+                <ixy>0.0</ixy>
+                <ixz>0.0</ixz>
+                <iyz>0.0</iyz>
+            </inertia>
+        </inertial>
     </link>
 
     <joint name="right_wheel_joint" type="continuous">
@@ -49,6 +71,17 @@
                 <color rgba="0 0 0 1"/>
             </material>
         </visual>
+        <inertial>
+            <mass>0.1</mass>
+            <inertia>
+                <ixx>0.0005</ixx>
+                <iyy>0.0005</iyy>
+                <izz>0.0005</izz>
+                <ixy>0.0</ixy>
+                <ixz>0.0</ixz>
+                <iyz>0.0</iyz>
+            </inertia>
+        </inertial>
     </link>
 
       <joint name="left_front_joint" type="continuous">
@@ -68,6 +101,17 @@
                 <color rgba="0 0 0 1"/>
             </material>
         </visual>
+        <inertial>
+            <mass>0.1</mass>
+            <inertia>
+                <ixx>0.0005</ixx>
+                <iyy>0.0005</iyy>
+                <izz>0.0005</izz>
+                <ixy>0.0</ixy>
+                <ixz>0.0</ixz>
+                <iyz>0.0</iyz>
+            </inertia>
+        </inertial>
     </link>
 
     <joint name="right_front_joint" type="continuous">
@@ -87,6 +131,17 @@
                 <color rgba="0 0 0 1"/>
             </material>
         </visual>
+        <inertial>
+            <mass>0.1</mass>
+            <inertia>
+                <ixx>0.0005</ixx>
+                <iyy>0.0005</iyy>
+                <izz>0.0005</izz>
+                <ixy>0.0</ixy>
+                <ixz>0.0</ixz>
+                <iyz>0.0</iyz>
+            </inertia>
+        </inertial>
     </link>
 
 
