@@ -116,51 +116,6 @@
         </collision>
       </link>
       
-      <!-- 前門左（pen1 上排第 1 間，綠色） -->
-      <link name="front_wall_left">
-        <pose>-0.87 -1.375 0.61 0 0 0</pose>
-        <visual name="visual">
-          <geometry>
-            <box>
-              <size>1.15 0.05 1.22</size>
-            </box>
-          </geometry>
-          <material>
-            <ambient>0.3 1.0 0.3 1</ambient>
-            <diffuse>0.3 1.0 0.3 1</diffuse>
-          </material>
-        </visual>
-        <collision name="collision">
-          <geometry>
-            <box>
-              <size>1.15 0.05 1.22</size>
-            </box>
-          </geometry>
-        </collision>
-      </link>
-      
-      <!-- 前門右（pen1 上排第 1 間，灰色） -->
-      <link name="front_wall_right">
-        <pose>0.87 -1.375 0.61 0 0 0</pose>
-        <visual name="visual">
-          <geometry>
-            <box>
-              <size>1.15 0.05 1.22</size>
-            </box>
-          </geometry>
-          <material>
-            <ambient>0.5 0.5 0.5 1</ambient>
-            <diffuse>0.5 0.5 0.5 1</diffuse>
-          </material>
-        </visual>
-        <collision name="collision">
-          <geometry>
-            <box>
-              <size>1.15 0.05 1.22</size>
-            </box>
-          </geometry>
-        </collision>
-      </link>
       
       <!-- 後門（pen1 上排第 1 間，黃色） -->
       <link name="back_wall">
@@ -282,51 +237,6 @@
         </collision>
       </link>
       
-      <!-- 前門左（pen2 上排第 2 間，綠色） -->
-      <link name="front_wall_left">
-        <pose>-0.87 -1.375 0.61 0 0 0</pose>
-        <visual name="visual">
-          <geometry>
-            <box>
-              <size>1.15 0.05 1.22</size>
-            </box>
-          </geometry>
-          <material>
-            <ambient>0.3 1.0 0.3 1</ambient>
-            <diffuse>0.3 1.0 0.3 1</diffuse>
-          </material>
-        </visual>
-        <collision name="collision">
-          <geometry>
-            <box>
-              <size>1.15 0.05 1.22</size>
-            </box>
-          </geometry>
-        </collision>
-      </link>
-      
-      <!-- 前門右（pen2 上排第 2 間，灰色） -->
-      <link name="front_wall_right">
-        <pose>0.87 -1.375 0.61 0 0 0</pose>
-        <visual name="visual">
-          <geometry>
-            <box>
-              <size>1.15 0.05 1.22</size>
-            </box>
-          </geometry>
-          <material>
-            <ambient>0.5 0.5 0.5 1</ambient>
-            <diffuse>0.5 0.5 0.5 1</diffuse>
-          </material>
-        </visual>
-        <collision name="collision">
-          <geometry>
-            <box>
-              <size>1.15 0.05 1.22</size>
-            </box>
-          </geometry>
-        </collision>
-      </link>
       
       <!-- 後門（pen2 上排第 2 間，黃色） -->
       <link name="back_wall">
@@ -448,51 +358,6 @@
         </collision>
       </link>
       
-      <!-- 前門左（pen3 上排第 3 間，綠色） -->
-      <link name="front_wall_left">
-        <pose>-0.87 -1.375 0.61 0 0 0</pose>
-        <visual name="visual">
-          <geometry>
-            <box>
-              <size>1.15 0.05 1.22</size>
-            </box>
-          </geometry>
-          <material>
-            <ambient>0.3 1.0 0.3 1</ambient>
-            <diffuse>0.3 1.0 0.3 1</diffuse>
-          </material>
-        </visual>
-        <collision name="collision">
-          <geometry>
-            <box>
-              <size>1.15 0.05 1.22</size>
-            </box>
-          </geometry>
-        </collision>
-      </link>
-      
-      <!-- 前門右（pen3 上排第 3 間，灰色） -->
-      <link name="front_wall_right">
-        <pose>0.87 -1.375 0.61 0 0 0</pose>
-        <visual name="visual">
-          <geometry>
-            <box>
-              <size>1.15 0.05 1.22</size>
-            </box>
-          </geometry>
-          <material>
-            <ambient>0.5 0.5 0.5 1</ambient>
-            <diffuse>0.5 0.5 0.5 1</diffuse>
-          </material>
-        </visual>
-        <collision name="collision">
-          <geometry>
-            <box>
-              <size>1.15 0.05 1.22</size>
-            </box>
-          </geometry>
-        </collision>
-      </link>
       
       <!-- 後門（pen3 上排第 3 間，黃色） -->
       <link name="back_wall">
@@ -609,52 +474,6 @@
           <geometry>
             <box>
               <size>0.05 2.75 1.22</size>
-            </box>
-          </geometry>
-        </collision>
-      </link>
-      
-      <!-- 前門左（pen4 上排第 4 間，綠色） -->
-      <link name="front_wall_left">
-        <pose>-0.87 -1.375 0.61 0 0 0</pose>
-        <visual name="visual">
-          <geometry>
-            <box>
-              <size>1.15 0.05 1.22</size>
-            </box>
-          </geometry>
-          <material>
-            <ambient>0.3 1.0 0.3 1</ambient>
-            <diffuse>0.3 1.0 0.3 1</diffuse>
-          </material>
-        </visual>
-        <collision name="collision">
-          <geometry>
-            <box>
-              <size>1.15 0.05 1.22</size>
-            </box>
-          </geometry>
-        </collision>
-      </link>
-      
-      <!-- 前門右（pen4 上排第 4 間，灰色） -->
-      <link name="front_wall_right">
-        <pose>0.87 -1.375 0.61 0 0 0</pose>
-        <visual name="visual">
-          <geometry>
-            <box>
-              <size>1.15 0.05 1.22</size>
-            </box>
-          </geometry>
-          <material>
-            <ambient>0.5 0.5 0.5 1</ambient>
-            <diffuse>0.5 0.5 0.5 1</diffuse>
-          </material>
-        </visual>
-        <collision name="collision">
-          <geometry>
-            <box>
-              <size>1.15 0.05 1.22</size>
             </box>
           </geometry>
         </collision>
@@ -780,51 +599,6 @@
         </collision>
       </link>
       
-      <!-- 後門左（pen5，黃色） -->
-      <link name="back_wall_left">
-        <pose>-0.87 1.375 0.61 0 0 0</pose>
-        <visual name="visual">
-          <geometry>
-            <box>
-              <size>1.15 0.05 1.22</size>
-            </box>
-          </geometry>
-          <material>
-            <ambient>1.0 1.0 0.3 1</ambient>
-            <diffuse>1.0 1.0 0.3 1</diffuse>
-          </material>
-        </visual>
-        <collision name="collision">
-          <geometry>
-            <box>
-              <size>1.15 0.05 1.22</size>
-            </box>
-          </geometry>
-        </collision>
-      </link>
-      
-      <!-- 後門右（pen5，紫色） -->
-      <link name="back_wall_right">
-        <pose>0.87 1.375 0.61 0 0 0</pose>
-        <visual name="visual">
-          <geometry>
-            <box>
-              <size>1.15 0.05 1.22</size>
-            </box>
-          </geometry>
-          <material>
-            <ambient>0.8 0.3 1.0 1</ambient>
-            <diffuse>0.8 0.3 1.0 1</diffuse>
-          </material>
-        </visual>
-        <collision name="collision">
-          <geometry>
-            <box>
-              <size>1.15 0.05 1.22</size>
-            </box>
-          </geometry>
-        </collision>
-      </link>
       
       <link name="front_wall">
         <pose>0 -1.375 0.61 0 0 0</pose>
@@ -945,51 +719,6 @@
         </collision>
       </link>
       
-      <!-- 後門左（pen6，黃色） -->
-      <link name="back_wall_left">
-        <pose>-0.87 1.375 0.61 0 0 0</pose>
-        <visual name="visual">
-          <geometry>
-            <box>
-              <size>1.15 0.05 1.22</size>
-            </box>
-          </geometry>
-          <material>
-            <ambient>1.0 1.0 0.3 1</ambient>
-            <diffuse>1.0 1.0 0.3 1</diffuse>
-          </material>
-        </visual>
-        <collision name="collision">
-          <geometry>
-            <box>
-              <size>1.15 0.05 1.22</size>
-            </box>
-          </geometry>
-        </collision>
-      </link>
-      
-      <!-- 後門右（pen6，紫色） -->
-      <link name="back_wall_right">
-        <pose>0.87 1.375 0.61 0 0 0</pose>
-        <visual name="visual">
-          <geometry>
-            <box>
-              <size>1.15 0.05 1.22</size>
-            </box>
-          </geometry>
-          <material>
-            <ambient>0.8 0.3 1.0 1</ambient>
-            <diffuse>0.8 0.3 1.0 1</diffuse>
-          </material>
-        </visual>
-        <collision name="collision">
-          <geometry>
-            <box>
-              <size>1.15 0.05 1.22</size>
-            </box>
-          </geometry>
-        </collision>
-      </link>
       
       <link name="front_wall">
         <pose>0 -1.375 0.61 0 0 0</pose>
@@ -1110,51 +839,6 @@
         </collision>
       </link>
       
-      <!-- 後門左（pen7，黃色） -->
-      <link name="back_wall_left">
-        <pose>-0.87 1.375 0.61 0 0 0</pose>
-        <visual name="visual">
-          <geometry>
-            <box>
-              <size>1.15 0.05 1.22</size>
-            </box>
-          </geometry>
-          <material>
-            <ambient>1.0 1.0 0.3 1</ambient>
-            <diffuse>1.0 1.0 0.3 1</diffuse>
-          </material>
-        </visual>
-        <collision name="collision">
-          <geometry>
-            <box>
-              <size>1.15 0.05 1.22</size>
-            </box>
-          </geometry>
-        </collision>
-      </link>
-      
-      <!-- 後門右（pen7，紫色） -->
-      <link name="back_wall_right">
-        <pose>0.87 1.375 0.61 0 0 0</pose>
-        <visual name="visual">
-          <geometry>
-            <box>
-              <size>1.15 0.05 1.22</size>
-            </box>
-          </geometry>
-          <material>
-            <ambient>0.8 0.3 1.0 1</ambient>
-            <diffuse>0.8 0.3 1.0 1</diffuse>
-          </material>
-        </visual>
-        <collision name="collision">
-          <geometry>
-            <box>
-              <size>1.15 0.05 1.22</size>
-            </box>
-          </geometry>
-        </collision>
-      </link>
       
       <link name="front_wall">
         <pose>0 -1.375 0.61 0 0 0</pose>
@@ -1275,51 +959,6 @@
         </collision>
       </link>
       
-      <!-- 後門左（pen8，黃色） -->
-      <link name="back_wall_left">
-        <pose>-0.87 1.375 0.61 0 0 0</pose>
-        <visual name="visual">
-          <geometry>
-            <box>
-              <size>1.15 0.05 1.22</size>
-            </box>
-          </geometry>
-          <material>
-            <ambient>1.0 1.0 0.3 1</ambient>
-            <diffuse>1.0 1.0 0.3 1</diffuse>
-          </material>
-        </visual>
-        <collision name="collision">
-          <geometry>
-            <box>
-              <size>1.15 0.05 1.22</size>
-            </box>
-          </geometry>
-        </collision>
-      </link>
-      
-      <!-- 後門右（pen8，紫色） -->
-      <link name="back_wall_right">
-        <pose>0.87 1.375 0.61 0 0 0</pose>
-        <visual name="visual">
-          <geometry>
-            <box>
-              <size>1.15 0.05 1.22</size>
-            </box>
-          </geometry>
-          <material>
-            <ambient>0.8 0.3 1.0 1</ambient>
-            <diffuse>0.8 0.3 1.0 1</diffuse>
-          </material>
-        </visual>
-        <collision name="collision">
-          <geometry>
-            <box>
-              <size>1.15 0.05 1.22</size>
-            </box>
-          </geometry>
-        </collision>
-      </link>
       
       <link name="front_wall">
         <pose>0 -1.375 0.61 0 0 0</pose>

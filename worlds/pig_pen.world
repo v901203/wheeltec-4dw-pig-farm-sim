@@ -5,6 +5,7 @@
     <magnetic_field>0 0 0</magnetic_field>
     <atmosphere type="adiabatic"/>
 
+    <!-- Gazebo 核心系統：物理、命令與場景廣播 -->
     <plugin
       filename="gz-sim-physics-system"
       name="gz::sim::systems::Physics">
@@ -18,6 +19,7 @@
       name="gz::sim::systems::SceneBroadcaster">
     </plugin>
 
+    <!-- 太陽光源 -->
     <light name="sun" type="directional">
       <cast_shadows>true</cast_shadows>
       <pose>0 0 10 0 0 0</pose>
@@ -26,6 +28,7 @@
       <direction>-0.4 0.1 -1</direction>
     </light>
 
+    <!-- 地板：整個豬舍的底面 -->
     <model name="floor">
       <static>true</static>
       <pose>0 0 0.01 0 0 0</pose>
@@ -52,6 +55,7 @@
       </link>
     </model>
 
+    <!-- 左側長牆 -->
     <model name="left_wall">
       <static>true</static>
       <pose>0 1.375 0.61 0 0 0</pose>
@@ -77,6 +81,7 @@
       </link>
     </model>
 
+    <!-- 右側長牆 -->
     <model name="right_wall">
       <static>true</static>
       <pose>0 -1.375 0.61 0 0 0</pose>
@@ -102,6 +107,7 @@
       </link>
     </model>
 
+    <!-- 後方直牆 -->
     <model name="back_wall">
       <static>true</static>
       <pose>1.445 0 0.61 0 0 0</pose>
@@ -127,6 +133,7 @@
       </link>
     </model>
 
+    <!-- 前方左半牆：左側入口/開口區段 -->
     <model name="front_left_wall">
       <static>true</static>
       <pose>-1.445 -0.295 0.61 0 0 0</pose>
@@ -152,7 +159,7 @@
       </link>
     </model>
 
-
+    <!-- 中央飼料盆 -->
     <model name="feeder">
       <static>true</static>
       <pose>0 0 0.275 0 0 0</pose>

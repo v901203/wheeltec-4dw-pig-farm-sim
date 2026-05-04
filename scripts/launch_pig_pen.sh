@@ -2,7 +2,7 @@
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WORLD_FILE="$DIR/../worlds/pig_pen_8units.world"
+WORLD_FILE="$DIR/../worlds/pig_pen_8units(lv1).world"
 LOG_DIR="$DIR/../logs"
 
 mkdir -p "$LOG_DIR"

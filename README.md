@@ -128,6 +128,41 @@ ros2 topic pub /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.2, y: 0.0, z: 0.
 
 若要改為直接用 PX4 / MAVLink 控制，請參考上方的 `START_PX4` 範例與 PX4 啟動流程。
 
+輪子速度橋接
+-------------
+如果你是要把 `/cmd_vel` 轉成左右輪轉速，則可使用 `scripts/cmdvel_to_wheels.py`。這支程式會依差速車運動學，把線速度與角速度換算成左右輪的角速度，再發布到：
+
+- `/wheeltec_mini/left_wheel_velocity`
+- `/wheeltec_mini/right_wheel_velocity`
+
+這個版本適合搭配模擬器或輪子控制介面使用，不需要直接寫 STM32 序列封包。
+
+里程計轉接
+----------
+程式 `scripts/republish_odom.py` 用來把 Gazebo 模型發出的里程計訊息轉發到標準 ROS topic。
+
+功用：
+- **訂閱**：從 `/model/wheeltec_mini/odometry` 聽（Gazebo 模型里程計）
+- **發布**：轉發到 `/odom`（ROS 標準里程計 topic）
+
+這樣做是為了讓其他 ROS 模組（導航、SLAM、定位等）可以直接訂閱通用的 `/odom` topic，而不用特別知道 Gazebo 模型的名稱。
+
+使用方式：
+```bash
+python3 scripts/republish_odom.py
+```
+
+8 單間豬舍世界
+----------------
+豬舍主世界檔在 [worlds/pig_pen_8units.world](worlds/pig_pen_8units.world)；目前已整理成可讀性較高的排版，並補上註解標示每一間單間與各牆面、飼料桶的用途。
+
+結構概覽：
+- 上排 4 間：`pen1` 到 `pen4`
+- 下排 4 間：`pen5` 到 `pen8`
+- 每間都包含：`floor`、左右牆、前/後牆或半牆、以及 `feeder`
+
+若要手動調整布局，建議先修改這個 world 檔，再重新啟動 Gazebo 檢查間距、牆面與通道是否符合需求。
+
 近期變更與快速驗證
 -----------------
 - 已修正 `turn_on_wheeltec_robot/urdf/four_wheel_diff_bs_robot.urdf` 中的座標偏移問題：

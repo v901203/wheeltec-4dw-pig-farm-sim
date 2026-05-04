@@ -637,7 +637,7 @@
         </collision>
       </link>
       
-      <!-- 前門右（pen4 上排第 4 間，灰色） -->
+      <!-- 前門右（pen4 上排第 4 間，綠色） -->
       <link name="front_wall_right">
         <pose>0.87 -1.375 0.61 0 0 0</pose>
         <visual name="visual">
