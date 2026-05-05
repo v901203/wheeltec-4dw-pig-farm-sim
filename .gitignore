@@ -1,3 +1,25 @@
+# 忽略所有大型壓縮包（這些是導致你 500 Error 的主因）
+*.zip
+*.rar
+*.7z
+*.tar.gz
+
+# 忽略影片與大型媒體檔案
+*.mp4
+*.mov
+*.avi
+
+# 忽略訓練日誌（TensorBoard 等，檔案數量極多）
+runs/
+logs/
+
+# 忽略強化學習訓練產生的模型權重（通常很大）
+#*.pth
+#*.onnx
+#*.pkl
+#checkpoint/
+#checkpoints/
+
 # ROS
 build/
 devel/

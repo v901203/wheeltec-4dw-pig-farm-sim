@@ -4,9 +4,9 @@
     <!-- ==================== 車體 (Base Link) ==================== -->
     <link name="base_link">
         <visual>
-            <origin xyz="0 0 0.16" rpy="0 0 0" />
+            <origin xyz="0 0 0.15" rpy="0 0 0" />
             <geometry>
-                <box size="0.67 0.53 0.150"/>
+                <box size="0.40 0.30 0.165"/>
             </geometry>
             <material name="white">
                 <color rgba="1 1 1 1"/>
@@ -14,14 +14,14 @@
         </visual>
 
         <collision>
-            <origin xyz="0 0 0.16" rpy="0 0 0" />
+            <origin xyz="0 0 0.15" rpy="0 0 0" />
             <geometry>
-                <box size="0.67 0.53 0.150"/>
+                <box size="0.40 0.30 0.165"/>
             </geometry>
         </collision>
 
         <inertial>
-            <origin xyz="0 0 0.16" rpy="0 0 0" />
+            <origin xyz="0 0 0.15" rpy="0 0 0" />
             <mass value="15.0"/>
             <inertia ixx="0.379" ixy="0.0" ixz="0.0" iyy="0.589" iyz="0.0" izz="0.912"/>
         </inertial>
@@ -29,7 +29,7 @@
 
     <!-- ==================== 左後輪 (Left Rear Wheel) ==================== -->
     <joint name="left_wheel_joint" type="continuous">
-        <origin xyz="-0.3 0.285 0.109" rpy="1.57 0 0"/>
+        <origin xyz="-0.14 0.175 0.075" rpy="1.57 0 0"/>
         <parent link="base_link"/>
         <child link="left_wheel_link"/>
         <axis xyz="0 0 -1"/>
@@ -40,7 +40,7 @@
         <visual>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-                <cylinder radius="0.109" length="0.04"/>
+                <cylinder radius="0.109" length="0.05"/>
             </geometry>
             <material name="black">
                 <color rgba="0 0 0 1"/>
@@ -49,7 +49,7 @@
         <collision>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-                <cylinder radius="0.109" length="0.04"/>
+                <cylinder radius="0.109" length="0.05"/>
             </geometry>
         </collision>
         <inertial>
@@ -61,7 +61,7 @@
 
     <!-- ==================== 右後輪 (Right Rear Wheel) ==================== -->
     <joint name="right_wheel_joint" type="continuous">
-        <origin xyz="-0.3 -0.285 0.109" rpy="1.57 0 0"/>
+        <origin xyz="-0.14 -0.175 0.075" rpy="1.57 0 0"/>
         <parent link="base_link"/>
         <child link="right_wheel_link"/>
         <axis xyz="0 0 -1"/>
@@ -72,7 +72,7 @@
         <visual>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-                <cylinder radius="0.109" length="0.04"/>
+                <cylinder radius="0.109" length="0.05"/>
             </geometry>
             <material name="black">
                 <color rgba="0 0 0 1"/>
@@ -81,7 +81,7 @@
         <collision>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-                <cylinder radius="0.109" length="0.04"/>
+                <cylinder radius="0.109" length="0.05"/>
             </geometry>
         </collision>
         <inertial>
@@ -93,7 +93,7 @@
 
     <!-- ==================== 左前輪 (Left Front Wheel) ==================== -->
     <joint name="left_front_joint" type="continuous">
-        <origin xyz="0.3 0.285 0.109" rpy="1.57 0 0"/>
+        <origin xyz="0.14 0.175 0.075" rpy="1.57 0 0"/>
         <parent link="base_link"/>
         <child link="left_front_link"/>
         <axis xyz="0 0 -1"/>
@@ -104,7 +104,7 @@
         <visual>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-                <cylinder radius="0.109" length="0.04"/>
+                <cylinder radius="0.109" length="0.05"/>
             </geometry>
             <material name="black">
                 <color rgba="0 0 0 1"/>
@@ -113,7 +113,7 @@
         <collision>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-                <cylinder radius="0.109" length="0.04"/>
+                <cylinder radius="0.109" length="0.05"/>
             </geometry>
         </collision>
         <inertial>
@@ -125,7 +125,7 @@
 
     <!-- ==================== 右前輪 (Right Front Wheel) ==================== -->
     <joint name="right_front_joint" type="continuous">
-        <origin xyz="0.3 -0.285 0.109" rpy="1.57 0 0"/>
+        <origin xyz="0.14 -0.175 0.075" rpy="1.57 0 0"/>
         <parent link="base_link"/>
         <child link="right_front_link"/>
         <axis xyz="0 0 -1"/>
@@ -136,7 +136,7 @@
         <visual>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-                <cylinder radius="0.109" length="0.04"/>
+                <cylinder radius="0.109" length="0.05"/>
             </geometry>
             <material name="black">
                 <color rgba="0 0 0 1"/>
@@ -145,7 +145,7 @@
         <collision>
             <origin xyz="0 0 0" rpy="0 0 0" />
             <geometry>
-                <cylinder radius="0.109" length="0.04"/>
+                <cylinder radius="0.109" length="0.05"/>
             </geometry>
         </collision>
         <inertial>
@@ -157,7 +157,7 @@
 
     <!-- ==================== 雷達 (LiDAR) ==================== -->
     <joint name="laser_joint" type="fixed">
-        <origin xyz="0.0 0 0.26" rpy="0 0 0"/>
+        <origin xyz="0.0 0 0.245" rpy="0 0 0"/>
         <parent link="base_link"/>
         <child link="laser_link"/>
     </joint>
@@ -187,7 +187,7 @@
 
 <!-- ==================== 深度相機 (Depth Camera) ==================== -->
     <joint name="depth_camera_joint" type="fixed">
-        <origin xyz="0.37 0 0.23" rpy="0 0 0"/> 
+        <origin xyz="0.2 0 0.095" rpy="0 0 0"/> 
         <parent link="base_link"/>
         <child link="depth_camera_link"/>
     </joint>
@@ -216,7 +216,7 @@
     </link>
 
     <gazebo reference="depth_camera_link">
-        <sensor name="depth_camera" type="camera">
+        <sensor name="depth_camera" type="depth">
             <pose>0 0 0 0 0 0</pose>
             <always_on>true</always_on>
             <visualize>true</visualize>
@@ -226,13 +226,8 @@
                 <image>
                     <width>640</width>
                     <height>480</height>
-                    <format>R8G8B8</format>
+                    <format>R_FLOAT32</format>
                 </image>
-                <depth>
-                    <width>640</width>
-                    <height>480</height>
-                    <format>R32F</format>
-                </depth>
                 <clip>
                     <near>0.1</near>
                     <far>10.0</far>

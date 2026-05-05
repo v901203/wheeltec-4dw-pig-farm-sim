@@ -2,7 +2,7 @@
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WORLD_FILE="$DIR/../worlds/pig_pen_8units(lv1).world"
+WORLD_FILE="$DIR/../worlds/pig_pen_8units(lv4).world"
 LOG_DIR="$DIR/../logs"
 
 mkdir -p "$LOG_DIR"
@@ -68,7 +68,7 @@ DEFAULT_URDF="$DIR/../turn_on_wheeltec_robot/urdf/four_wheel_diff_bs_robot.urdf"
 if [ -x "$SPAWN_SCRIPT" ] || [ -f "$SPAWN_SCRIPT" ]; then
 	if [ -f "$DEFAULT_URDF" ]; then
 		echo "Spawning robot from $DEFAULT_URDF (logs: $LOG_DIR/spawn.log)"
-		bash "$SPAWN_SCRIPT" --file "$DEFAULT_URDF" --model wheeltec_mini --pos 0 0 0 --yaw 0 &> "$LOG_DIR/spawn.log" &
+		bash "$SPAWN_SCRIPT" --file "$DEFAULT_URDF" --model wheeltec_mini --pos -7 0 0 --yaw 0 &> "$LOG_DIR/spawn.log" &
 		SPAWN_PID=$!
 	else
 		echo "Default URDF not found ($DEFAULT_URDF). To spawn from topic, run: $SPAWN_SCRIPT --model NAME"

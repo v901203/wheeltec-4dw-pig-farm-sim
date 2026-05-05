@@ -1,0 +1,37 @@
+Panels:
+  - Class: rviz/Displays
+Visualization Manager:
+  Class: ""
+  Name: "Visualization Manager"
+  Enabled: true
+  Global Options:
+    Fixed Frame: base_link
+  Tools:
+    - Class: rviz_default_plugins/Interact
+  Displays:
+    - Name: RobotModel
+      Class: rviz_default_plugins/RobotModel
+      Enabled: true
+      Robot Description: /robot_description
+      Alpha: 1.0
+    - Name: LaserScan
+      Class: rviz_default_plugins/LaserScan
+      Enabled: true
+      Topic: /scan
+      Size (m): 0.05
+    - Name: CameraDepthPoints
+      Class: rviz_default_plugins/PointCloud2
+      Enabled: true
+      Topic: /camera/depth/points_reliable
+      Decay Time: 0
+      Size (Pixels): 3
+    - Name: CameraImage
+      Class: rviz_default_plugins/Image
+      Enabled: true
+      Topic: /camera/depth/image_raw
+      Normalize Range: false
+      Min Value: 0.1
+      Max Value: 5
+  Value:
+    Class: ""
+    Name: ""
