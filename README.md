@@ -228,4 +228,25 @@ sudo apt install ros-humble-zed-description
 如有疑問，請告訴我是否要把本地備份刪除或保留在 repo 中。
 
 # 在 RViz 中應能看到機器人移動、點雲與雷達掃描同步更新
+### 🛠️ Troubleshooting: RViz 畫面全黑 / 找不到 Displays 設定面板
+
+**問題描述**
+在啟動 RViz 或是切換 Git 版本後，可能會遇到相機畫面全黑，且左側用來設定 Topic 的 `Displays` 面板消失的狀況。請依照以下步驟將面板叫出並重新配置影像訊號。
+
+**解決步驟**
+
+1. **開啟 Panels 選單**
+   * 導覽至 RViz 視窗左上角的選單列。
+   * 點擊位於 `File` 與 `Help` 之間的 **`Panels`** 選單。
+
+2. **啟用 Displays 面板**
+   * 在彈出的下拉選單中，找到並點擊 **`Displays`** 確保其呈現勾選狀態。
+   * 此時，包含 `Global Options`、`RobotModel` 等設定的清單將會重新出現在視窗左側。
+
+3. **重新配置影像 Topic 與參數**
+   * 在重新出現的 `Displays` 清單中，尋找對應的影像接收器（通常為 **`Image`** 或 **`CameraDepthPointCloud`**）。
+   * 點擊該項目左側的 **小三角箭頭（▶）** 將詳細設定展開。
+   * 進行以下設定以恢復畫面：
+     * **Topic：** 點擊右側空白處展開下拉選單，**手動重新選取**正確的相機 Topic。
+     * **參數檢查：** 往下檢查是否有 **`Normalize Range`**（建議勾選），或是確認 **`Min` / `Max`** 等距離數值設定是否合理，避免因數值錯誤導致畫面無法渲染而呈現全黑。
 ```
