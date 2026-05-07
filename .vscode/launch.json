@@ -23,5 +23,29 @@
         "PYTHONPATH": "${workspaceFolder}"
       }
     }
+    ,
+    {
+      "name": "Run live simulation",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/examples/run_live.py",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}"
+      }
+    },
+    {
+      "name": "Run inference (Stable-Baselines3)",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/examples/run_inference_sb3.py",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "args": ["--model","models/best_model.zip","--episodes","5"],
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}"
+      }
+    }
   ]
 }
