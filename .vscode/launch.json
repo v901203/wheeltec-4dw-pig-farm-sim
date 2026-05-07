@@ -1,0 +1,27 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run train_random_agent",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/examples/train_random_agent.py",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}"
+      }
+    },
+    {
+      "name": "Render env preview",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/examples/render_preview.py",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}"
+      }
+    }
+  ]
+}
