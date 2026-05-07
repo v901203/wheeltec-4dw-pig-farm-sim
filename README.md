@@ -199,5 +199,33 @@ ros2 topic info -v /odom
 # 發送前進指令
 ros2 topic pub -r 10 /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.2}, angular: {z: 0.0}}"
 
+
+外部依賴與子模組（ZED 描述）
+----------------------------
+本專案使用官方 ZED 描述包作為機器人深度相機的 xacro/mesh 定義，放置於 `zed_description` 子模組（來源：https://github.com/stereolabs/zed-ros2-description）。
+
+若你還沒 clone repository，建議使用：
+
+```bash
+git clone --recurse-submodules https://github.com/v901203/wheeltec-4dw-pig-farm-sim.git
+cd wheeltec-4wd
+```
+
+若已經 clone 但沒有初始化子模組，請執行：
+
+```bash
+git submodule update --init --recursive
+```
+
+如果你已經在本地手動下載過 `zed_description`，為避免覆寫，助理會把該目錄備份為 `zed_description_local_backup`，再以子模組方式加入。子模組加入後，請用 `git submodule update --init --recursive` 在其他機器上還原。
+
+（可選）系統套件替代方式：若你的系統提供相容的 ROS2 套件，也可改由 apt 安裝描述包，例如：
+
+```bash
+sudo apt install ros-humble-zed-description
+```
+
+如有疑問，請告訴我是否要把本地備份刪除或保留在 repo 中。
+
 # 在 RViz 中應能看到機器人移動、點雲與雷達掃描同步更新
 ```

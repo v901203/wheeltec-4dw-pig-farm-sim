@@ -1,0 +1,3 @@
+[submodule "zed_description"]
+	path = zed_description
+	url = https://github.com/stereolabs/zed-ros2-description.git
