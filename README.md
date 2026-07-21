@@ -37,6 +37,13 @@ cd /home/vito/Desktop/4wd
 ./scripts/spawn_robot.sh --file turn_on_wheeltec_robot/urdf/four_wheel_diff_bs_robot.urdf --model wheeltec_mini --pos -7 0 0.01 --yaw 0
 ```
 
+註：上面範例會 spawn 檔案 `turn_on_wheeltec_robot/urdf/four_wheel_diff_bs_robot.urdf`，對應 Gazebo 模型名稱為 `wheeltec_mini`（也是預設在 `scripts/launch_clean.sh` 與其他啟動腳本中使用的機器人）。
+
+如果想要 spawn 其他車型，例如旗艦版，可以把 `--file` 改為 `turn_on_wheeltec_robot/urdf/flagship_four_wheel_diff_bs_robot.urdf`，並視需要調整 `--model` 參數為對應的模型名稱。例如：
+```bash
+./scripts/spawn_robot.sh --file turn_on_wheeltec_robot/urdf/flagship_four_wheel_diff_bs_robot.urdf --model flagship_four_wheel_diff_bs --pos -7 0 0.01 --yaw 0
+```
+
 ### SLAM / 導航範例
 
 若要手動啟動 SLAM（假設已安裝 slam_toolbox）：
@@ -199,6 +206,36 @@ ros2 topic info -v /odom
 # 發送前進指令
 ros2 topic pub -r 10 /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.2}, angular: {z: 0.0}}"
 
+```
+
+控制腳本
+-----------
+
+本專案提供一支簡單的控制腳本 `scripts/control_cmdvel.py`，方便在已啟動 ROS2 與模擬後，以參數方式快速發送 `Twist` 指令：
+
+- 範例：向前 0.2 m/s 持續 3 秒
+```bash
+python3 scripts/control_cmdvel.py --linear 0.2 --duration 3
+```
+
+- 範例：原地逆時針旋轉 0.5 rad/s 持續 2 秒
+```bash
+python3 scripts/control_cmdvel.py --angular 0.5 --duration 2
+```
+
+命令選項：
+- `--topic` (`-t`)：目標 topic（預設 `/cmd_vel`）
+- `--linear` (`-x`)：`linear.x`（m/s）
+- `--angular` (`-z`)：`angular.z`（rad/s）
+- `--duration` (`-d`)：持續時間（秒）
+- `--rate` (`-r`)：發布頻率（Hz，預設 10）
+
+注意：執行此腳本前請先 `source` ROS2 環境與啟動模擬或相關節點，例如：
+```bash
+source /opt/ros/humble/setup.bash
+source install/local_setup.bash  # 若使用 workspace 的 install
+./scripts/launch_clean.sh
+```
 
 外部依賴與子模組（ZED 描述）
 ----------------------------
@@ -248,5 +285,5 @@ sudo apt install ros-humble-zed-description
    * 點擊該項目左側的 **小三角箭頭（▶）** 將詳細設定展開。
    * 進行以下設定以恢復畫面：
      * **Topic：** 點擊右側空白處展開下拉選單，**手動重新選取**正確的相機 Topic。
-     * **參數檢查：** 往下檢查是否有 **`Normalize Range`**（建議勾選），或是確認 **`Min` / `Max`** 等距離數值設定是否合理，避免因數值錯誤導致畫面無法渲染而呈現全黑。
+     ＠＠* **參數檢查：** 往下檢查是否有 **`Normalize Range`**（建議勾選），或是確認 **`Min` / `Max`** 等距離數值設定是否合理，避免因數值錯誤導致畫面無法渲染而呈現全黑。
 ```

@@ -1,0 +1,66 @@
+<?xml version="1.0" ?>
+<sdf version="1.7">
+  <model name="farm_pig">
+    <static>false</static>
+    <link name="link">
+      <inertial>
+        <mass>40.0</mass>
+        <inertia>
+          <ixx>1.36</ixx><ixy>0</ixy><ixz>0</ixz>
+          <iyy>3.53</iyy><iyz>0</iyz>
+          <izz>3.23</izz>
+        </inertia>
+      </inertial>
+
+      <visual name="body_visual">
+        <geometry>
+          <box>
+            <size>0.9 0.4 0.5</size>
+          </box>
+        </geometry>
+        <material>
+          <ambient>1.0 0.75 0.79 1.0</ambient> 
+          <diffuse>1.0 0.75 0.79 1.0</diffuse>
+        </material>
+      </visual>
+      
+      <collision name="body_collision">
+        <geometry>
+          <box>
+            <size>0.9 0.4 0.5</size>
+          </box>
+        </geometry>
+        <!-- 加入摩擦力，讓豬被撞到時不會像在冰上滑行 -->
+        <surface>
+          <friction>
+            <ode>
+              <mu>0.5</mu>
+              <mu2>0.5</mu2>
+            </ode>
+          </friction>
+        </surface>
+      </collision>
+
+      <visual name="face_marker_visual">
+        <pose>0.451 0 0 0 0 0</pose>
+        <geometry>
+          <box>
+            <size>0.001 0.35 0.40</size>
+          </box>
+        </geometry>
+        <material>
+          <script>
+            <uri>model://pig_model/media/scripts</uri>
+            <uri>model://pig_model/media/textures</uri>
+            <name>PigFarm/ArUcoFace</name>
+          </script>
+        </material>
+      </visual>
+    </link>
+
+    <!-- 加入速度控制外掛，允許從 ROS 2 接收 cmd_vel 指令 -->
+    <plugin filename="gz-sim-velocity-control-system" name="gz::sim::systems::VelocityControl">
+      <link_name>link</link_name>
+    </plugin>
+  </model>
+</sdf>
