@@ -2,7 +2,7 @@
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WORLD_FILE="${1:-$DIR/../worlds/pig_pen_8units(lv4).world}"
+WORLD_FILE="${1:-$DIR/../worlds/pig_pen_8units_lv4_new.world}"
 LOG_DIR="$DIR/../logs"
 MODEL="wheeltec_mini"
 URDF="$DIR/../turn_on_wheeltec_robot/urdf/four_wheel_diff_bs_robot.urdf"
@@ -22,6 +22,21 @@ if [[ -f "$DIR/../install/setup.bash" ]]; then
 	# shellcheck disable=SC1091
 	source "$DIR/../install/setup.bash"
 	set -u
+fi
+
+# --- 假豬模型 (farm_pig / pig_model 套件) 資源路徑 ---
+# model.sdf 內同時用了兩種引用：
+#   model://farm_pig            -> 需要 .../pig_model/models 在路徑中
+#   model://pig_model/media/... -> 需要 .../pig_model 的上一層在路徑中
+# 若你的實際路徑不是 $HOME/Desktop/4wd/pig_model，執行前可覆寫：
+#   PIG_MODEL_PKG_DIR=/your/path/to/pig_model ./launch_clean.sh
+PIG_MODEL_PKG_DIR="${PIG_MODEL_PKG_DIR:-$HOME/Desktop/4wd/pig_model}"
+if [[ -d "$PIG_MODEL_PKG_DIR" ]]; then
+	export GZ_SIM_RESOURCE_PATH="$PIG_MODEL_PKG_DIR/models:$(dirname "$PIG_MODEL_PKG_DIR"):${GZ_SIM_RESOURCE_PATH:-}"
+	echo "pig_model 資源路徑已加入 GZ_SIM_RESOURCE_PATH: $PIG_MODEL_PKG_DIR"
+else
+	echo "警告: 找不到 pig_model 套件路徑 ($PIG_MODEL_PKG_DIR)，farm_pig 假豬模型可能無法載入。" >&2
+	echo "       可用 PIG_MODEL_PKG_DIR=/正確路徑 ./launch_clean.sh 指定正確位置。" >&2
 fi
 
 cleanup() {
@@ -67,7 +82,7 @@ sleep 1
 
 if [[ -f "$URDF" && -x "$DIR/spawn_robot.sh" ]]; then
 	echo "Spawning robot: $URDF"
-	bash "$DIR/spawn_robot.sh" --file "$URDF" --model "$MODEL" --pos -7 0 0.01 --yaw 0 \
+	bash "$DIR/spawn_robot.sh" --file "$URDF" --model "$MODEL" --pos 0 0 0.05 --yaw 1.5708 \
 		&> "$LOG_DIR/spawn.log" &
 fi
 
