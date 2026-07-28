@@ -53,7 +53,7 @@
     </model>
 
     <model name="pen1">
-      <pose>-2.4 3.885 0 0 0 0</pose>
+      <pose>-2.4 4.405 0 0 0 0</pose>
       <static>true</static>
 
       <link name="floor">
@@ -326,7 +326,7 @@
     </model>
 
     <model name="pen2">
-      <pose>-2.4 1.295 0 0 0 0</pose>
+      <pose>-2.4 1.815 0 0 0 0</pose>
       <static>true</static>
 
       <link name="floor">
@@ -599,7 +599,7 @@
     </model>
 
     <model name="pen3">
-      <pose>-2.4 -1.295 0 0 0 0</pose>
+      <pose>-2.4 -1.815 0 0 0 0</pose>
       <static>true</static>
 
       <link name="floor">
@@ -872,7 +872,7 @@
     </model>
 
     <model name="pen4">
-      <pose>-2.4 -3.885 0 0 0 0</pose>
+      <pose>-2.4 -4.405 0 0 0 0</pose>
       <static>true</static>
 
       <link name="floor">
@@ -1145,7 +1145,7 @@
     </model>
 
     <model name="pen5">
-      <pose>2.4 3.885 0 0 0 0</pose>
+      <pose>2.4 4.405 0 0 0 0</pose>
       <static>true</static>
 
       <link name="floor">
@@ -1418,7 +1418,7 @@
     </model>
 
     <model name="pen6">
-      <pose>2.4 1.295 0 0 0 0</pose>
+      <pose>2.4 1.815 0 0 0 0</pose>
       <static>true</static>
 
       <link name="floor">
@@ -1691,7 +1691,7 @@
     </model>
 
     <model name="pen7">
-      <pose>2.4 -1.295 0 0 0 0</pose>
+      <pose>2.4 -1.815 0 0 0 0</pose>
       <static>true</static>
 
       <link name="floor">
@@ -1964,7 +1964,7 @@
     </model>
 
     <model name="pen8">
-      <pose>2.4 -3.885 0 0 0 0</pose>
+      <pose>2.4 -4.405 0 0 0 0</pose>
       <static>true</static>
 
       <link name="floor">
@@ -2241,42 +2241,42 @@
     <include>
       <uri>model://farm_pig</uri>
       <name>pig1</name>
-      <pose>-2.4 4.585 0.27 0 0 0</pose>
+      <pose>-2.4 5.105 0.27 0 0 0</pose>
     </include>
     <include>
       <uri>model://farm_pig</uri>
       <name>pig2</name>
-      <pose>-2.4 1.995 0.27 0 0 0</pose>
+      <pose>-2.4 2.515 0.27 0 0 0</pose>
     </include>
     <include>
       <uri>model://farm_pig</uri>
       <name>pig3</name>
-      <pose>-2.4 -0.595 0.27 0 0 0</pose>
+      <pose>-2.4 -1.115 0.27 0 0 0</pose>
     </include>
     <include>
       <uri>model://farm_pig</uri>
       <name>pig4</name>
-      <pose>-2.4 -3.185 0.27 0 0 0</pose>
+      <pose>-2.4 -3.705 0.27 0 0 0</pose>
     </include>
     <include>
       <uri>model://farm_pig</uri>
       <name>pig5</name>
-      <pose>2.4 4.585 0.27 0 0 3.1416</pose>
+      <pose>2.4 5.105 0.27 0 0 3.1416</pose>
     </include>
     <include>
       <uri>model://farm_pig</uri>
       <name>pig6</name>
-      <pose>2.4 1.995 0.27 0 0 3.1416</pose>
+      <pose>2.4 2.5155 0.27 0 0 3.1416</pose>
     </include>
     <include>
       <uri>model://farm_pig</uri>
       <name>pig7</name>
-      <pose>2.4 -0.595 0.27 0 0 3.1416</pose>
+      <pose>2.4 -1.115 0.27 0 0 3.1416</pose>
     </include>
     <include>
       <uri>model://farm_pig</uri>
       <name>pig8</name>
-      <pose>2.4 -3.185 0.27 0 0 3.1416</pose>
+      <pose>2.4 -3.705 0.27 0 0 3.1416</pose>
     </include>
   </world>
 </sdf>
