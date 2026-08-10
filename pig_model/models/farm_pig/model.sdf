@@ -49,11 +49,13 @@
           </box>
         </geometry>
         <material>
-          <script>
-            <uri>model://pig_model/media/scripts</uri>
-            <uri>model://pig_model/media/textures</uri>
-            <name>PigFarm/ArUcoFace</name>
-          </script>
+          <ambient>1 1 1 1</ambient>
+          <diffuse>1 1 1 1</diffuse>
+          <pbr>
+            <metal>
+              <albedo_map>model://pig_model/media/textures/aruco_marker.png</albedo_map>
+            </metal>
+          </pbr>
         </material>
       </visual>
     </link>

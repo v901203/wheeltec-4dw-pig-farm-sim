@@ -2,7 +2,7 @@
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WORLD_FILE="${1:-$DIR/../worlds/pig_pen_8units_lv4_new.world}"
+WORLD_FILE="${1:-$DIR/../worlds/pig_pen_16units.world}"
 LOG_DIR="$DIR/../logs"
 MODEL="wheeltec_mini"
 URDF="$DIR/../turn_on_wheeltec_robot/urdf/four_wheel_diff_bs_robot.urdf"
@@ -48,16 +48,36 @@ cleanup() {
 	pkill -f "pointcloud_qos_relay.py" || true
 	pkill -f "publish_robot_description.py" || true
 	pkill -f "spawn_robot.sh" || true
+	pkill -f "pig_behavior.py" || true
+	pkill -f "aruco_face_detector.py" || true
 }
 trap cleanup EXIT
 
 echo "World: $WORLD_FILE"
 echo "Logs: $LOG_DIR"
 
-echo "Starting gz sim..."
-gz sim "$WORLD_FILE" -r &> "$LOG_DIR/gz_sim.log" &
+echo "Starting gz sim server (headless)..."
+gz sim -s -r "$WORLD_FILE" &> "$LOG_DIR/gz_sim_server.log" &
 GZ_PID=$!
 sleep 3
+
+echo "Starting gz sim GUI (attaching to running server)..."
+# 注意：故意不用 `gz sim <world> -r`（server+GUI 一起啟動），
+# 因為實測發現這種模式下 GUI 的場景同步 (SceneBroadcaster) 偶爾會在
+# 啟動當下漏接，導致之後 spawn 的機器人不會出現在 Entity Tree／畫面裡，
+# 即使機器人在 server 端其實是正常存在的。分開啟動、GUI 晚一點再接上去，
+# 目前測試起來穩定很多。
+gz sim -g &> "$LOG_DIR/gz_sim_gui.log" &
+GZ_GUI_PID=$!
+sleep 2
+
+echo "Starting pig random-behavior controller (forward 20% / rotate 30% / stop 50%)..."
+if [[ -f "$DIR/pig_behavior.py" ]]; then
+	python3 -u "$DIR/pig_behavior.py" --world "$WORLD_FILE" &> "$LOG_DIR/pig_behavior.log" &
+	PIG_BEHAVIOR_PID=$!
+else
+	echo "Note: $DIR/pig_behavior.py not found; skip pig behavior control." >&2
+fi
 
 echo "Starting ros_gz_bridge with remaps..."
 ros2 run ros_gz_bridge parameter_bridge \
@@ -66,7 +86,7 @@ ros2 run ros_gz_bridge parameter_bridge \
 	/camera_info@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo \
 	/camera/color/image_raw@sensor_msgs/msg/Image[gz.msgs.Image \
 	/camera_right/image_raw@sensor_msgs/msg/Image[gz.msgs.Image \
-	/cmd_vel@geometry_msgs/msg/Twist[gz.msgs.Twist \
+	/cmd_vel@geometry_msgs/msg/Twist]gz.msgs.Twist \
 	/model/${MODEL}/odometry@nav_msgs/msg/Odometry[gz.msgs.Odometry \
 	--ros-args \
 	-r /model/${MODEL}/odometry:=/odom \
@@ -84,6 +104,14 @@ if [[ -f "$URDF" && -x "$DIR/spawn_robot.sh" ]]; then
 	echo "Spawning robot: $URDF"
 	bash "$DIR/spawn_robot.sh" --file "$URDF" --model "$MODEL" --pos 0 0 0.05 --yaw 1.5708 \
 		&> "$LOG_DIR/spawn.log" &
+fi
+
+echo "Starting ArUco face detector..."
+if [[ -f "$DIR/aruco_face_detector.py" ]]; then
+	python3 -u "$DIR/aruco_face_detector.py" &> "$LOG_DIR/aruco_face_detector.log" &
+	ARUCO_PID=$!
+else
+	echo "Note: $DIR/aruco_face_detector.py not found; skip ArUco face detector." >&2
 fi
 
 if command -v ros2 >/dev/null 2>&1 && ros2 pkg prefix robot_state_publisher >/dev/null 2>&1; then

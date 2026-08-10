@@ -1,289 +1,216 @@
-簡短說明：ROS2 Humble + Gazebo 模擬環境，用於四輪機器人的 Gazebo 模擬、感測器融合、SLAM 與導航。
+Wheeltec 4WD 豬舍 ROS 2 / Gazebo 模擬專案
+## 專案簡介
 
-主要世界場景
------------
-目前使用的豬舍世界檔為 [worlds/pig_pen_8units(lv4).world](worlds/pig_pen_8units(lv4).world)，共 8 間單獨豬舍：
-- 上排 4 間：`pen1` ~ `pen4`
-- 下排 4 間：`pen5` ~ `pen8`
-- 每間包含：地面、牆面、飼料桶等
+本專案基於 ROS 2 Humble 與 Gazebo (Ignition/Sim)，專為四輪驅動 (4WD) 巡檢機器人在豬舍環境中的感測器融合、深度學習 (RL / 行為複製 BC)、SLAM 與自主導航所設計。支援 Gazebo 模擬器與實體 Wheeltec STM32 底盤雙軌運行。
 
-快速開始
--------
+## 1. 網格與場景規格 (Pig Pen World)
+目前預設使用的豬舍世界檔為 worlds/pig_pen_8units(lv4).world（舊版可參考 worlds/pig_pen_8units.world），包含 8 間單獨豬舍與 8 隻帶有 ArUco 貼圖的假豬模型：
 
-**推薦方式：使用 `launch_clean.sh` 一鍵啟動**（包括 Gazebo、bridge、depth 管道、RViz）
+### 豬舍結構規格
+- 單間尺寸：長 3.30m x 寬 2.55m 長方形。
 
-```bash
+- 四面欄杆牆：
+
+- 長邊牆 (left_wall / right_wall)：3.30m，各含 32 根圓柱欄杆。
+
+- 短邊牆 (front_wall / back_wall)：2.55m，各含 24 根圓柱欄杆。
+
+- 欄杆規格：總高 83cm、直徑 1.5cm、中心間距 10cm（淨空隙 8.5cm）。
+
+- 高度校正：下橫桿 0.035m、欄杆中心 0.415m、上橫桿 0.795m，完全貼合地面無空隙。
+
+### 長邊相鄰佈局 (Long-Side Adjacent)
+- 左排 (X = -2.4m)：pen1 -> pen2 -> pen3 -> pen4，沿 Y 軸長邊相鄰排列（間距 4cm）。
+
+- 右排 (X = +2.4m)：pen5 -> pen6 -> pen7 -> pen8，沿 Y 軸長邊相鄰排列（間距 4cm）。
+
+- 中央巡檢走道：兩排之間預留 1.5m 寬走道（沿 Y 軸延伸，X 範圍約在 -0.75m ~ +0.75m）。
+
+### 豬隻與 ArUco 視覺標記
+- 每間豬舍配備 1 隻假豬模型 (farm_pig)，放置於飼料盆旁（偏移 0.7m 避開碰撞體）。
+
+豬隻前端帶有 ArUco Marker 貼圖，統一朝向中央走道：
+
+- 左排 (pig1 ~ pig4)：ArUco 面朝向 +X 方向。
+
+- 右排 (pig5 ~ pig8)：ArUco 面旋轉 180 度朝向 -X 方向。
+
+## 2. 機器人硬體與感測器配置
+底盤基於 Wheeltec 4WD 差速車 (wheeltec_mini)，URDF 檔位於 turn_on_wheeltec_robot/urdf/four_wheel_diff_bs_robot.urdf：
+
+底盤尺寸：0.40m x 0.30m x 0.065m，離地高度 4.5cm，輪胎直徑 15cm（半徑 7.5cm）。
+
+預設出生點：X=0.0, Y=0.0, Z=0.05，朝向 Y 軸正方向（yaw = 1.5708），位於中央走道正起點。
+
+感測器裝備：
+
+2D LiDAR (M10P-PHY)：Topic /scan，位於 Z 軸 0.245m 處。
+
+前方深度相機 (ZED X)：
+
+深度圖 Topic：/camera/depth/image_raw
+
+彩色圖 Topic：/camera/color/image_raw
+
+右側監視相機 (Right Camera)：
+
+彩色圖 Topic：/camera_right/image_raw（朝右側拍攝豬欄）
+
+## 3. 快速開始
+### 一鍵完整啟動 (推薦)
+自動開啟 Gazebo 豬舍場景、機器人 Spawn、ROS 2 Bridge 通訊、點雲處理節點與 RViz2。
+打開終端機，執行：
+
 cd /home/vito/Desktop/4wd
-./scripts/launch_clean.sh
-```
-
-此腳本會自動啟動：
-- Gazebo world（豬舍場景）
-- 機器人 URDF spawn
-- ROS 2 bridge（topics：`/scan`、`/camera/depth/image_raw`、`/camera/depth/camera_info`、`/odom`、`/cmd_vel`）
-- 深度點雲轉換（depth_image_proc）
-- 點雲 QoS relay（BEST_EFFORT → RELIABLE）
-- RViz 配置預覽
-
-### 手動場景啟動（若需更多控制）
-
-1. 只啟動 Gazebo + 機器人（不含感測器/RViz）：
-```bash
-./scripts/launch_pig_pen.sh
-```
-
-2. 手動 spawn 特定 URDF：
-```bash
-./scripts/spawn_robot.sh --file turn_on_wheeltec_robot/urdf/four_wheel_diff_bs_robot.urdf --model wheeltec_mini --pos -7 0 0.01 --yaw 0
-```
-
-註：上面範例會 spawn 檔案 `turn_on_wheeltec_robot/urdf/four_wheel_diff_bs_robot.urdf`，對應 Gazebo 模型名稱為 `wheeltec_mini`（也是預設在 `scripts/launch_clean.sh` 與其他啟動腳本中使用的機器人）。
-
-如果想要 spawn 其他車型，例如旗艦版，可以把 `--file` 改為 `turn_on_wheeltec_robot/urdf/flagship_four_wheel_diff_bs_robot.urdf`，並視需要調整 `--model` 參數為對應的模型名稱。例如：
-```bash
-./scripts/spawn_robot.sh --file turn_on_wheeltec_robot/urdf/flagship_four_wheel_diff_bs_robot.urdf --model flagship_four_wheel_diff_bs --pos -7 0 0.01 --yaw 0
-```
-
-### SLAM / 導航範例
-
-若要手動啟動 SLAM（假設已安裝 slam_toolbox）：
-```bash
-ros2 launch slam_toolbox online_async_launch.py
-```
-
-手動遙控機器人移動：
-```bash
-ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -r cmd_vel:=/cmd_vel
-```
-
-串口控制 (STM32) — 實體底盤
----------------------------
-本專案提供與 STM32 底盤兼容的串口控制橋接。主要要點：
-
-- 波特率：115200, 資料位 8, 停止位 1, 無校驗 (115200 8N1)
-- 串口：機器人板上 ROS 控制預設使用串口 3（實際請以硬體標示為準）
-- 下行封包長度：11 bytes，格式如下：
-
-	[0]  0x7B (帧頭)
-	[1]  預留 (0x00)
-	[2]  預留 (0x00)
-	[3]  X MSB
-	[4]  X LSB
-	[5]  Y MSB
-	[6]  Y LSB
-	[7]  Z MSB
-	[8]  Z LSB
-	[9]  校驗 (前 9 bytes XOR)
-	[10] 0x7D (帧尾)
-
-- 資料型態與單位：
-	- X, Y：有號 16-bit short，單位 mm/s（big-endian，高位先傳）
-	- Z：有號 16-bit short，等於 angular_z (rad/s) * 1000（big-endian）
-
-- 範例（向前 100 mm/s）：
-	- 十六進位：7B 00 00 00 64 00 00 00 00 1F 7D
-	- 其中校驗 0x1F = XOR(前 9 bytes)
-
-使用專案提供的橋接程式
----------------------
-我已新增腳本 `scripts/cmdvel_to_stm32.py`，功能：訂閱 ROS2 的 `/cmd_vel`（`geometry_msgs/Twist`），將速度轉為手冊封包並寫入指定序列埠。使用方式：
-
-1. 安裝依賴（若環境尚未提供）：
-```bash
-pip install pyserial
-```
-
-2. 範例啟動（假設序列埠為 `/dev/ttyUSB0`）：
-```bash
-# 在已啟動 ROS2 環境下
-python3 scripts/cmdvel_to_stm32.py --ros-args -p port:=/dev/ttyUSB0 -p baudrate:=115200
-```
-
-3. 測試發佈 `cmd_vel`：
-```bash
-ros2 topic pub /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.2, y: 0.0, z: 0.0}, angular: {x:0.0, y:0.0, z:0.0}}" -r 10
-```
-
-安全提示：在第一次下發命令前，建議將底盤懸空或降低速度，並確認序列埠正確，避免車體意外移動造成損傷。
-
-若要改為直接用 PX4 / MAVLink 控制，請參考上方的 `START_PX4` 範例與 PX4 啟動流程。
-
-輪子速度橋接
--------------
-如果你是要把 `/cmd_vel` 轉成左右輪轉速，則可使用 `scripts/cmdvel_to_wheels.py`。這支程式會依差速車運動學，把線速度與角速度換算成左右輪的角速度，再發布到：
-
-- `/wheeltec_mini/left_wheel_velocity`
-- `/wheeltec_mini/right_wheel_velocity`
-
-這個版本適合搭配模擬器或輪子控制介面使用，不需要直接寫 STM32 序列封包。
-
-里程計轉接
-----------
-程式 `scripts/republish_odom.py` 用來把 Gazebo 模型發出的里程計訊息轉發到標準 ROS topic。
-
-功用：
-- **訂閱**：從 `/model/wheeltec_mini/odometry` 聽（Gazebo 模型里程計）
-- **發布**：轉發到 `/odom`（ROS 標準里程計 topic）
-
-這樣做是為了讓其他 ROS 模組（導航、SLAM、定位等）可以直接訂閱通用的 `/odom` topic，而不用特別知道 Gazebo 模型的名稱。
-
-使用方式：
-```bash
-python3 scripts/republish_odom.py
-```
-
-8 單間豬舍世界
-----------------
-豬舍主世界檔在 [worlds/pig_pen_8units.world](worlds/pig_pen_8units.world)；目前已整理成可讀性較高的排版，並補上註解標示每一間單間與各牆面、飼料桶的用途。
-
-結構概覽：
-- 上排 4 間：`pen1` 到 `pen4`
-- 下排 4 間：`pen5` 到 `pen8`
-- 每間都包含：`floor`、左右牆、前/後牆或半牆、以及 `feeder`
-
-若要手動調整布局，建議先修改這個 world 檔，再重新啟動 Gazebo 檢查間距、牆面與通道是否符合需求。
-
-近期變更與快速驗證
------------------
-- 已修正 `turn_on_wheeltec_robot/urdf/four_wheel_diff_bs_robot.urdf` 中的座標偏移問題：
-	- `base_link` 的 visual/collision/inertial 原點由 `-0.2 0 0.16` 調為 `0 0 0.0775`（對應車體離地 4.5 cm、總高 6.5 cm）。
-	- `laser_joint` 已為 `0.0 0 0.245`。
-	- `depth_camera_joint` 已移到車頭邊緣並置中為 `0.2 0 0.095`。
-
-今日更新：Gazebo / 深度相機 / RViz 整合
---------------------------------
-- 車體數據：
-	- 車體方形離地 4.5 cm
-	- 車體總高 6.5 cm
-	- 輪子直徑 15 cm（半徑 7.5 cm）
-	- 車體箱體尺寸約為 0.40 m × 0.30 m × 0.065 m
-- 新增並整理了乾淨啟動腳本 `scripts/launch_clean.sh`，可一次啟動：
-	- Gazebo world
-	- `ros_gz_bridge` 的 `/scan`、`/camera`、`/camera_info`、`/odom`、`/cmd_vel` bridge
-	- `robot_state_publisher`
-	- 深度點雲產生節點 `depth_image_proc/point_cloud_xyz_node`
-	- 點雲 QoS relay `scripts/pointcloud_qos_relay.py`
-	- RViz 預設配置 `rviz/wheeltec.rviz`
-- 已把深度相機與雷達的 TF 外參整理到 `launch_clean.sh` 與 `scripts/launch_with_bridge.sh`，避免感測器 frame 混亂：
-	- `base_link -> wheeltec_mini/base_link/depth_camera`
-	- `base_link -> wheeltec_mini/base_link/lidar`
-- 已固定 RViz 觀看設定：
-	- `Fixed Frame: base_link`
-	- 深度影像顯示 `/camera/depth/image_raw`
-	- 點雲顯示 `/camera/depth/points_reliable`
-- 為了讓 RViz 能順利顯示深度點雲，新增 `scripts/pointcloud_qos_relay.py`，把 `BEST_EFFORT` 的 `/camera/depth/points` 轉成 `RELIABLE` 的 `/camera/depth/points_reliable`。
-- 目前的建議啟動流程：
-	1. 執行 `./scripts/launch_clean.sh`
-	2. 打開 `rviz/wheeltec.rviz`
-	3. 若需要檢查資料流，先看 `/scan`、`/camera/depth/image_raw`、`/camera/depth/points_reliable` 是否都有訊息
-
-快速驗證
---------
-
-### 檢查 Topics 是否正確發佈
-
-啟動 `launch_clean.sh` 後，驗證核心 topics：
-```bash
-# 檢查雷達掃描
-ros2 topic info -v /scan
-
-# 檢查深度影像
-ros2 topic info -v /camera/depth/image_raw
-
-# 檢查相機內参
-ros2 topic info -v /camera/depth/camera_info
-
-# 檢查點雲（RELIABLE 版本）
-ros2 topic info -v /camera/depth/points_reliable
-
-# 檢查里程計
-ros2 topic info -v /odom
-```
-
-### 測試速度控制
-
-```bash
-# 發送前進指令
-ros2 topic pub -r 10 /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.2}, angular: {z: 0.0}}"
-
-```
-
-控制腳本
------------
-
-本專案提供一支簡單的控制腳本 `scripts/control_cmdvel.py`，方便在已啟動 ROS2 與模擬後，以參數方式快速發送 `Twist` 指令：
-
-- 範例：向前 0.2 m/s 持續 3 秒
-```bash
-python3 scripts/control_cmdvel.py --linear 0.2 --duration 3
-```
-
-- 範例：原地逆時針旋轉 0.5 rad/s 持續 2 秒
-```bash
-python3 scripts/control_cmdvel.py --angular 0.5 --duration 2
-```
-
-命令選項：
-- `--topic` (`-t`)：目標 topic（預設 `/cmd_vel`）
-- `--linear` (`-x`)：`linear.x`（m/s）
-- `--angular` (`-z`)：`angular.z`（rad/s）
-- `--duration` (`-d`)：持續時間（秒）
-- `--rate` (`-r`)：發布頻率（Hz，預設 10）
-
-注意：執行此腳本前請先 `source` ROS2 環境與啟動模擬或相關節點，例如：
-```bash
 source /opt/ros/humble/setup.bash
-source install/local_setup.bash  # 若使用 workspace 的 install
+source install/setup.bash
 ./scripts/launch_clean.sh
+(此腳本會自動啟動：Gazebo 豬舍場景、機器人自動 Spawn、ROS 2 Bridge 通訊包含雷達/相機/里程計/控制訊號、深度點雲轉換節點、點雲 QoS Relay 以及 RViz 預設配置)
+
+### 手動場景與車型控制
+若只需啟動 Gazebo + 機器人（不含感測器與 RViz）：
+
+./scripts/launch_pig_pen.sh
+手動 Spawn 特定車型 (如旗艦版)：
+
+./scripts/spawn_robot.sh --file turn_on_wheeltec_robot/urdf/flagship_four_wheel_diff_bs_robot.urdf --model flagship_four_wheel_diff_bs --pos 0 0 0.05 --yaw 1.5708
+### 鍵盤遙控小車
+啟動新的終端機，執行鍵盤控制節點：
+
+ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -r cmd_vel:=/cmd_vel
+
+鍵盤控制方式：
+
 ```
 
-外部依賴與子模組（ZED 描述）
-----------------------------
-本專案使用官方 ZED 描述包作為機器人深度相機的 xacro/mesh 定義，放置於 `zed_description` 子模組（來源：https://github.com/stereolabs/zed-ros2-description）。
+text
+移動控制：
 
-若你還沒 clone repository，建議使用：
+u    i    o
+j    k    l
+m    ,    .
 
-```bash
-git clone --recurse-submodules https://github.com/v901203/wheeltec-4dw-pig-farm-sim.git
-cd wheeltec-4wd
+        ↑
+   左轉  前進  右轉
+        ↓
+      後退
+
+按住 Shift 可啟用全向移動（側移）：
+
+U    I    O
+J    K    L
+M    <    >
+
+其他控制：
+
+t：上升（+Z）
+b：下降（-Z）
+
+其他未定義按鍵：停止
+
+q / z：最大速度增加 / 減少 10%
+w / x：僅增加 / 減少線速度 10%
+e / c：僅增加 / 減少角速度 10%
+
+Ctrl-C：結束鍵盤控制
+
+目前預設速度：
+speed 0.50
+turn  1.00
+
+注意：
+- 執行 teleop_twist_keyboard 的終端機必須保持鍵盤焦點，小車才會接收到按鍵指令。
+- 如果小車沒有反應，請先確認 Gazebo、ROS 2 Bridge 與 /cmd_vel 都已正常啟動。
 ```
 
-若已經 clone 但沒有初始化子模組，請執行：
+## 4. 深度學習與數據收集 (Behavioral Cloning / DRL)
+本專案提供基於 PyTorch (CUDA GPU 加速) 與 Stable-Baselines3 的模仿學習與走道巡邏工具：
 
-```bash
+### 錄製手動駕駛資料 (Expert Demonstrations)
+啟動模擬後，開啟錄製腳本，手動駕駛小車在走道巡邏以收集姿態與 /scan 雷達資料（資料自動存為 .npz 格式於 recorded_data/ 目錄中）：
+
+python3 scripts/teleop_recorder.py
+### GPU 加速行為複製訓練 (Behavioral Cloning Training)
+讀取錄製的專家資料，於 GPU 上預訓練神經網路 Policy：
+
+python3 scripts/train_bc_model.py
+### 走道巡邏控制節點
+測試純雷達相對距離的走道自動巡邏與到底轉向邏輯：
+
+python3 scripts/hallway_patrol.py
+## 5. SLAM 建圖與自主導航
+啟動 SLAM 建圖（需先安裝 slam_toolbox）：
+
+ros2 launch slam_toolbox online_async_launch.py
+儲存建好的地圖：
+
+ros2 run nav2_map_server map_saver_cli -f my_pigpen_map
+## 6. 常用工具與轉接腳本 (scripts/)
+launch_clean.sh：整合主啟動腳本。
+
+pointcloud_qos_relay.py：將 BEST_EFFORT 點雲轉換為 RELIABLE 的 /camera/depth/points_reliable 供 RViz 穩定顯示。
+
+republish_odom.py：將 /model/wheeltec_mini/odometry 轉發至標準 /odom Topic，方便導航與 SLAM 模組對接。
+
+cmdvel_to_wheels.py：依差速車運動學將 /cmd_vel 換算為左右輪角速度，發布至 /wheeltec_mini/left_wheel_velocity 及 right_wheel_velocity。
+
+cmdvel_to_stm32.py：將 /cmd_vel 轉為實體 STM32 串口 11-byte 通訊封包 (115200 8N1)。
+
+control_cmdvel.py：快速發送單次或定時速度測試指令。
+
+python3 scripts/control_cmdvel.py --linear 0.2 --duration 3
+## 7. 串口控制協議 (STM32 實體底盤)
+本專案提供與 Wheeltec STM32 底盤相容的串口控制橋接：
+
+串口規格：115200 Baud, 8 Data Bits, 1 Stop Bit, No Parity (115200 8N1)，硬體預設串口 3。
+
+資料型態與單位：
+
+X, Y 軸速度：有號 16-bit Short，單位 mm/s (Big-Endian)。
+
+Z 軸角速度：有號 16-bit Short，等於 angular_z (rad/s) * 1000 (Big-Endian)。
+
+下行封包結構 (11 Bytes)：
+
+索引 (Byte)	描述
+[0]	0x7B (幀頭)
+[1]	預留 (0x00)
+[2]	預留 (0x00)
+[3]	X 軸速度 MSB
+[4]	X 軸速度 LSB
+[5]	Y 軸速度 MSB
+[6]	Y 軸速度 LSB
+[7]	Z 軸角速度 MSB
+[8]	Z 軸角速度 LSB
+[9]	校驗碼 (前 9 Bytes 之 XOR 校驗)
+[10]	0x7D (幀尾)
+
+啟動實體串口橋接：
+
+python3 scripts/cmdvel_to_stm32.py --ros-args -p port:=/dev/ttyUSB0 -p baudrate:=115200
+## 8. 外部依賴與 Git 子模組 (ZED Description)
+本專案使用官方 ZED 描述包作為機器人相機的 xacro/mesh 定義，放置於 zed_description 子模組。
+若剛 Clone 本專案，請更新子模組：
+
 git submodule update --init --recursive
-```
+或透過系統 apt 安裝備用描述包：
 
-如果你已經在本地手動下載過 `zed_description`，為避免覆寫，助理會把該目錄備份為 `zed_description_local_backup`，再以子模組方式加入。子模組加入後，請用 `git submodule update --init --recursive` 在其他機器上還原。
-
-（可選）系統套件替代方式：若你的系統提供相容的 ROS2 套件，也可改由 apt 安裝描述包，例如：
-
-```bash
 sudo apt install ros-humble-zed-description
-```
+## 9. 常見問題與除錯 (Troubleshooting)
+按鍵盤車子不會動：
 
-如有疑問，請告訴我是否要把本地備份刪除或保留在 repo 中。
+檢查 ros_gz_bridge 中 /cmd_vel 的方向符號必須為 ] (/cmd_vel@geometry_msgs/msg/Twist]gz.msgs.Twist)。
 
-# 在 RViz 中應能看到機器人移動、點雲與雷達掃描同步更新
-### 🛠️ Troubleshooting: RViz 畫面全黑 / 找不到 Displays 設定面板
+確保鍵盤焦點維持在執行 teleop_twist_keyboard 的終端機視窗上。
 
-**問題描述**
-在啟動 RViz 或是切換 Git 版本後，可能會遇到相機畫面全黑，且左側用來設定 Topic 的 `Displays` 面板消失的狀況。請依照以下步驟將面板叫出並重新配置影像訊號。
+RViz 畫面全黑 / 找不到 Displays 面板：
 
-**解決步驟**
+點擊 RViz 左上角 Panels -> Displays 勾選開啟面板。
 
-1. **開啟 Panels 選單**
-   * 導覽至 RViz 視窗左上角的選單列。
-   * 點擊位於 `File` 與 `Help` 之間的 **`Panels`** 選單。
+確保 Topic 已正確選擇（如 /camera/depth/points_reliable、/camera/color/image_raw 或 /camera_right/image_raw）。
 
-2. **啟用 Displays 面板**
-   * 在彈出的下拉選單中，找到並點擊 **`Displays`** 確保其呈現勾選狀態。
-   * 此時，包含 `Global Options`、`RobotModel` 等設定的清單將會重新出現在視窗左側。
+小車行駛時過度打滑：
 
-3. **重新配置影像 Topic 與參數**
-   * 在重新出現的 `Displays` 清單中，尋找對應的影像接收器（通常為 **`Image`** 或 **`CameraDepthPointCloud`**）。
-   * 點擊該項目左側的 **小三角箭頭（▶）** 將詳細設定展開。
-   * 進行以下設定以恢復畫面：
-     * **Topic：** 點擊右側空白處展開下拉選單，**手動重新選取**正確的相機 Topic。
-     ＠＠* **參數檢查：** 往下檢查是否有 **`Normalize Range`**（建議勾選），或是確認 **`Min` / `Max`** 等距離數值設定是否合理，避免因數值錯誤導致畫面無法渲染而呈現全黑。
-```
+可在 four_wheel_diff_bs_robot.urdf 的輪胎 <gazebo> 標籤中，將摩擦係數 mu1 與 mu2 調高至 20.0 ~ 50.0。
+
+可在 DiffDrive 插件中限制最大加速度（如 <max_linear_acceleration>1.5</max_linear_acceleration>）。
