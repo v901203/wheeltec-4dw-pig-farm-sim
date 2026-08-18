@@ -1,4 +1,5 @@
-#include "turn_on_wheeltec_robot/Quaternion_Solution.h"
+
+#include "Quaternion_Solution.h"
 #define SAMPLING_FREQ 20.0f // 采样频率
 /**************************************
 Date: May 31, 2020
@@ -38,7 +39,7 @@ void Quaternion_Solution(float gx, float gy, float gz, float ax, float ay, float
     recipNorm = InvSqrt(ax * ax + ay * ay + az * az);
     ax *= recipNorm;
     ay *= recipNorm;
-    az *= recipNorm;
+    az *= recipNorm;      
     // 把四元数换算成方向余弦中的第三行的三个元素
     halfvx = q1 * q3 - q0 * q2;
     halfvy = q0 * q1 + q2 * q3;
@@ -76,7 +77,7 @@ void Quaternion_Solution(float gx, float gy, float gz, float ax, float ay, float
   q0 += (-qb * gx - qc * gy - q3 * gz);
   q1 += (qa * gx + qc * gz - q3 * gy);
   q2 += (qa * gy - qb * gz + q3 * gx);
-  q3 += (qa * gz + qb * gy - qc * gx);
+  q3 += (qa * gz + qb * gy - qc * gx); 
   // Normalise quaternion
   recipNorm = InvSqrt(q0 * q0 + q1 * q1 + q2 * q2 + q3 * q3);
   q0 *= recipNorm;

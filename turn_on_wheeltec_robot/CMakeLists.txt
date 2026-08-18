@@ -1,37 +1,59 @@
-cmake_minimum_required(VERSION 2.8.3)
+cmake_minimum_required(VERSION 3.8)
 project(turn_on_wheeltec_robot)
 
-find_package(catkin REQUIRED COMPONENTS
-  actionlib
-  actionlib_msgs
+if(NOT CMAKE_CXX_STANDARD)
+  set(CMAKE_CXX_STANDARD 17)
+endif()
+if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  add_compile_options(-Wall -Wextra -g)
+endif()
+
+find_package(ament_cmake REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
+find_package(tf2 REQUIRED)
+find_package(tf2_ros REQUIRED)
+find_package(tf2_geometry_msgs REQUIRED)
+find_package(serial_driver REQUIRED)
+find_package(io_context REQUIRED)
+
+include_directories(include)
+
+add_executable(wheeltec_robot_node
+  src/wheeltec_robot.cpp
+  src/Quaternion_Solution.cpp
+)
+
+ament_target_dependencies(wheeltec_robot_node
+  rclcpp
   geometry_msgs
-  message_generation
   nav_msgs
-  nav_msgs
-  roscpp
-  serial
-  roslib
-  rospy
   sensor_msgs
   std_msgs
-  tf
+  tf2
+  tf2_ros
+  tf2_geometry_msgs
+  serial_driver
+  io_context
 )
 
-# ulimit -c unlimited
-# ssh firefly@192.168.1.76
-add_compile_options(-g -std=c++11)    #-g -> core dumped
-
-catkin_package(
-  #INCLUDE_DIRS include
-  #LIBRARIES turn_on_wheeltec_robot
-  #CATKIN_DEPENDS geometry_msgs message_generation nav_msgs nav_msgs roscpp roslib rospy sensor_msgs std_msgs tf
-  #DEPENDS system_lib
+install(TARGETS
+  wheeltec_robot_node
+  DESTINATION lib/${PROJECT_NAME}
 )
 
-# defind robot status massage
-# command atkin_make -DCATKIN_WHITELIST_PACKAGES="new_msg"
-include_directories(include ${catkin_INCLUDE_DIRS} ${PCL_INCLUDE_DIRS})
-include_directories(include/${PROJECT_NAME})
+# urdf/launch/map/params_costmap_car 是原本 package 就有的資料夾，
+# 這裡只是安裝進 install space 方便之後用 share 路徑找到；OPTIONAL 避免資料夾不存在時 build 失敗。
+install(DIRECTORY
+  urdf
+  launch
+  map
+  params_costmap_car
+  DESTINATION share/${PROJECT_NAME}
+  OPTIONAL
+)
 
-add_executable(wheeltec_robot_node src/wheeltec_robot.cpp src/Quaternion_Solution.cpp)
-target_link_libraries(wheeltec_robot_node ${catkin_LIBRARIES})
+ament_package()

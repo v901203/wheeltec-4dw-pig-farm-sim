@@ -32,8 +32,10 @@ fi
 #   PIG_MODEL_PKG_DIR=/your/path/to/pig_model ./launch_clean.sh
 PIG_MODEL_PKG_DIR="${PIG_MODEL_PKG_DIR:-$HOME/Desktop/4wd/pig_model}"
 if [[ -d "$PIG_MODEL_PKG_DIR" ]]; then
+	# Fortress (ign gazebo) 主要吃 IGN_GAZEBO_RESOURCE_PATH，同時保留 GZ_SIM_RESOURCE_PATH 以防萬一
+	export IGN_GAZEBO_RESOURCE_PATH="$PIG_MODEL_PKG_DIR/models:$(dirname "$PIG_MODEL_PKG_DIR"):${IGN_GAZEBO_RESOURCE_PATH:-}"
 	export GZ_SIM_RESOURCE_PATH="$PIG_MODEL_PKG_DIR/models:$(dirname "$PIG_MODEL_PKG_DIR"):${GZ_SIM_RESOURCE_PATH:-}"
-	echo "pig_model 資源路徑已加入 GZ_SIM_RESOURCE_PATH: $PIG_MODEL_PKG_DIR"
+	echo "pig_model 資源路徑已加入 IGN_GAZEBO_RESOURCE_PATH / GZ_SIM_RESOURCE_PATH: $PIG_MODEL_PKG_DIR"
 else
 	echo "警告: 找不到 pig_model 套件路徑 ($PIG_MODEL_PKG_DIR)，farm_pig 假豬模型可能無法載入。" >&2
 	echo "       可用 PIG_MODEL_PKG_DIR=/正確路徑 ./launch_clean.sh 指定正確位置。" >&2
@@ -42,7 +44,7 @@ fi
 cleanup() {
 	echo "Cleaning up..."
 	pkill -f "ros_gz_bridge" || true
-	pkill -f "gz sim" || true
+	pkill -f "ign gazebo" || true
 	pkill -f "robot_state_publisher" || true
 	pkill -f "depth_image_proc" || true
 	pkill -f "pointcloud_qos_relay.py" || true
@@ -56,18 +58,18 @@ trap cleanup EXIT
 echo "World: $WORLD_FILE"
 echo "Logs: $LOG_DIR"
 
-echo "Starting gz sim server (headless)..."
-gz sim -s -r "$WORLD_FILE" &> "$LOG_DIR/gz_sim_server.log" &
+echo "Starting ign gazebo server (headless)..."
+ign gazebo -s -r "$WORLD_FILE" &> "$LOG_DIR/gz_sim_server.log" &
 GZ_PID=$!
 sleep 3
 
-echo "Starting gz sim GUI (attaching to running server)..."
-# 注意：故意不用 `gz sim <world> -r`（server+GUI 一起啟動），
+echo "Starting ign gazebo GUI (attaching to running server)..."
+# 注意：故意不用 `ign gazebo <world> -r`（server+GUI 一起啟動），
 # 因為實測發現這種模式下 GUI 的場景同步 (SceneBroadcaster) 偶爾會在
 # 啟動當下漏接，導致之後 spawn 的機器人不會出現在 Entity Tree／畫面裡，
 # 即使機器人在 server 端其實是正常存在的。分開啟動、GUI 晚一點再接上去，
 # 目前測試起來穩定很多。
-gz sim -g &> "$LOG_DIR/gz_sim_gui.log" &
+ign gazebo -g &> "$LOG_DIR/gz_sim_gui.log" &
 GZ_GUI_PID=$!
 sleep 2
 
