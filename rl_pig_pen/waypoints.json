@@ -1,0 +1,89 @@
+{
+  "start": {
+    "world_x": 0.0,
+    "world_y": -14.0,
+    "world_yaw": 1.5708
+  },
+  "patrol_waypoints": [
+    {
+      "name": "junction1_entry",
+      "x": 7.712,
+      "y": -0.0
+    },
+    {
+      "name": "junction1_top",
+      "x": 7.1144,
+      "y": -3.4519
+    },
+    {
+      "name": "junction1_center",
+      "x": 8.1725,
+      "y": -0.2095
+    },
+    {
+      "name": "junction1_bottom",
+      "x": 9.4293,
+      "y": 3.1335
+    },
+    {
+      "name": "junction1_exit",
+      "x": 8.5859,
+      "y": -0.4477
+    },
+    {
+      "name": "junction2_entry",
+      "x": 14.428,
+      "y": -1.1064
+    },
+    {
+      "name": "junction2_top",
+      "x": 13.7567,
+      "y": -4.5478
+    },
+    {
+      "name": "junction2_center",
+      "x": 14.5648,
+      "y": -1.1891
+    },
+    {
+      "name": "junction2_bottom",
+      "x": 15.3447,
+      "y": 2.2885
+    },
+    {
+      "name": "junction2_exit",
+      "x": 14.5364,
+      "y": -1.1705
+    },
+    {
+      "name": "junction3_entry",
+      "x": 20.7883,
+      "y": -4.8711
+    },
+    {
+      "name": "junction3_top",
+      "x": 20.7883,
+      "y": -8.27
+    },
+    {
+      "name": "junction3_center",
+      "x": 20.265,
+      "y": -1.2725
+    },
+    {
+      "name": "junction3_bottom",
+      "x": 19.756,
+      "y": 2.2287
+    },
+    {
+      "name": "junction3_exit",
+      "x": 20.0492,
+      "y": -1.3288
+    },
+    {
+      "name": "goal",
+      "x": 25.3088,
+      "y": -0.0267
+    }
+  ]
+}

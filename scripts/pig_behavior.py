@@ -8,21 +8,8 @@ pig_behavior.py
     - 50% 機率：停止
 
 作法：直接對每隻豬的 Gazebo VelocityControl 外掛送 Twist 指令，
-      topic 格式為 /model/<豬的名字>/cmd_vel (message: gz.msgs.Twist)。
-      這跟 model.sdf 裡宣告的
-          <plugin filename="gz-sim-velocity-control-system" name="gz::sim::systems::VelocityControl">
-            <link_name>link</link_name>
-          </plugin>
-      是相對應的，不需要額外透過 ros_gz_bridge。
-
-用法：
-    python3 pig_behavior.py --world /path/to/pig_pen_16units_lv4.world
-
-    # 想自行指定豬的名字列表 (不從 world 檔解析)：
-    python3 pig_behavior.py --pigs pig1_a pig1_b pig2_a pig2_b
-
-    # 先在沒有安裝 gz 的機器上測試邏輯是否正確：
-    python3 pig_behavior.py --world ./pig_pen_16units_lv4.world --dry-run
+      topic 格式為 /model/<豬的名字>/cmd_vel。
+      會自動偵測系統為 Ignition Fortress (ign) 或新版 Gazebo (gz)。
 """
 
 import argparse
@@ -33,6 +20,17 @@ import subprocess
 import sys
 import threading
 import time
+
+# ---- 自動檢測使用 ign 還是 gz (解決版本相容問題) ----
+GZ_CMD = None
+MSG_TYPE = None
+
+if shutil.which("ign"):
+    GZ_CMD = "ign"
+    MSG_TYPE = "ignition.msgs.Twist"
+elif shutil.which("gz"):
+    GZ_CMD = "gz"
+    MSG_TYPE = "gz.msgs.Twist"
 
 # ---- 行為機率設定 (需總和為1.0) ----
 ACTIONS = ["forward", "rotate", "stop"]
@@ -70,11 +68,11 @@ class PigController(threading.Thread):
     def publish(self, linear_x: float, angular_z: float):
         proto = build_twist_proto(linear_x, angular_z)
         if self.args.dry_run:
-            print(f"[dry-run] {self.topic}  ->  {proto}")
+            print(f"[dry-run] {GZ_CMD} topic -t {self.topic} -m {MSG_TYPE} -p '{proto}'")
             return
         try:
             subprocess.run(
-                ["gz", "topic", "-t", self.topic, "-m", "gz.msgs.Twist", "-p", proto],
+                [GZ_CMD, "topic", "-t", self.topic, "-m", MSG_TYPE, "-p", proto],
                 check=False,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -98,16 +96,9 @@ class PigController(threading.Thread):
 
             duration = rng.uniform(self.args.min_duration, self.args.max_duration)
 
-            # 只在行為切換時發布一次指令。VelocityControl 外掛會持續套用最後
-            # 收到的速度，不需要一直重發；過去每0.3秒重發一次的做法，在32隻豬
-            # 同時運作時會產生大量短命的 gz-transport CLI 子程序，每個都要重新
-            # 做一次 discovery 廣播，量大時會干擾 Gazebo GUI 與 server 之間的
-            # 場景同步(SceneBroadcaster)，導致 GUI 的 Entity Tree 漏更新。
             self.publish(lin, ang)
 
             if self.args.republish_interval > 0:
-                # 仍保留一個低頻率的「保險重發」，避免萬一漏封包導致豬卡住不動，
-                # 但預設間隔拉長很多，大幅降低 subprocess 呼叫頻率。
                 end_time = time.time() + duration
                 while not self.stop_event.is_set() and time.time() < end_time:
                     self.stop_event.wait(self.args.republish_interval)
@@ -129,8 +120,8 @@ def main():
     parser.add_argument("--min-duration", type=float, default=2.0, help="每個行為最短持續秒數")
     parser.add_argument("--max-duration", type=float, default=5.0, help="每個行為最長持續秒數")
     parser.add_argument("--republish-interval", type=float, default=3.0,
-                         help="保險重發的間隔秒數，設為0代表切換行為時只發一次、完全不重發 (預設3.0)")
-    parser.add_argument("--dry-run", action="store_true", help="只印出會發布的指令，不實際呼叫 gz topic（測試用）")
+                         help="保險重發的間隔秒數，設為0代表切換行為時只發一次 (預設3.0)")
+    parser.add_argument("--dry-run", action="store_true", help="只印出會發布的指令，不實際呼叫 (測試用)")
     args = parser.parse_args()
 
     if args.pigs:
@@ -144,12 +135,12 @@ def main():
         print("[錯誤] 沒有找到任何 farm_pig，請確認 --world 路徑或 --pigs 內容是否正確。", file=sys.stderr)
         sys.exit(1)
 
-    if not args.dry_run and shutil.which("gz") is None:
-        print("[錯誤] 找不到 gz 指令，請確認已安裝 Gazebo (gz-tools) 並在 PATH 中。"
-              "也可以先加 --dry-run 測試邏輯。", file=sys.stderr)
+    if not args.dry_run and GZ_CMD is None:
+        print("[錯誤] 找不到 ign 或 gz 指令，請確認已安裝 Gazebo 並在 PATH 中。", file=sys.stderr)
         sys.exit(1)
 
     print(f"控制豬隻數量: {len(pig_names)}")
+    print(f"使用指令模組: {GZ_CMD} ({MSG_TYPE})")
     print(f"行為機率設定: 前進={WEIGHTS[0]*100:.0f}%  旋轉={WEIGHTS[1]*100:.0f}%  停止={WEIGHTS[2]*100:.0f}%")
     print("按 Ctrl-C 結束並讓所有豬停止。\n")
 
