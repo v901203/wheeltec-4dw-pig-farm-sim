@@ -58,3 +58,4 @@ Makefile
 .venv/
 **/.venv/
 venv/
+env/
