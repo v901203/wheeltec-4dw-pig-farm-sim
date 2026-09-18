@@ -13,6 +13,8 @@
 # 忽略訓練日誌（TensorBoard 等，檔案數量極多）
 runs/
 logs/
+rl_pig_pen/logs_*/
+rl_pig_pen/demonstrations/
 
 # 忽略強化學習訓練產生的模型權重（通常很大）
 #*.pth

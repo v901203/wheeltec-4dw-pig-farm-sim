@@ -1,116 +1,113 @@
 #!/usr/bin/env python3
-"""
-PPO 訓練腳本 — 豬舍巡邏任務
+"""Train a 38-D policy on corridor segments or complete hybrid patrols."""
 
-使用前：
-  1. ./launch_clean.sh            （另一個 Terminal）
-  2. python3 calibrate_waypoints.py  （先校準路徑點）
-  3. python3 train_ppo.py            （開始訓練）
-
-監控訓練：
-  tensorboard --logdir logs/
-  → 開瀏覽器看 http://localhost:6006
-"""
-
-import os
+import argparse
+from pathlib import Path
+import re
+import signal
 import torch
+
 from stable_baselines3 import PPO
-from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.callbacks import (
-    CheckpointCallback,
-)
+from stable_baselines3.common.callbacks import CheckpointCallback
 from stable_baselines3.common.env_checker import check_env
+from training_monitor import TrainingMonitor as Monitor
 
+from navigation import CONFIG_FILE
 from pig_pen_env import PigPenEnv
+from patrol_training_env import PatrolTrainingEnv
+from model_utils import CHECKPOINT_DIR, LOG_DIR, latest_checkpoint, resolve_checkpoint, validate_model
+from policy_config import PPO_PARAMS
+from parallel_training import WorkerFactory, TrainingVecEnv, ParallelProgress
 
-# ── 訓練參數 ────────────────────────────────────────────────────────────
-TOTAL_TIMESTEPS  = 3_000_000   # 總訓練步數；豬舍巡邏任務建議至少 2M
-CHECKPOINT_FREQ  = 20_000      # 每隔幾步存一次 checkpoint
-CHECKPOINT_DIR   = "checkpoints"
-LOG_DIR          = "logs"
-WAYPOINTS_FILE   = "waypoints.json"
-EVAL_FREQ        = 50_000      # 每隔幾步做一次評估（獨立 episode）
-
-# ── PPO 超參數（基於 MlpPolicy + 連續動作的常用設定） ────────────────
-PPO_PARAMS = dict(
-    n_steps    = 2048,    # 每次更新前蒐集的步數
-    batch_size = 512,     # mini-batch 大小；RTX 5090 可以設更大
-    n_epochs   = 10,      # 每次更新重複迭代幾次
-    gamma      = 0.99,    # 折扣因子
-    gae_lambda = 0.95,    # GAE lambda
-    clip_range = 0.2,     # PPO clip 範圍
-    ent_coef   = 0.01,    # 熵正則係數（鼓勵探索）
-    learning_rate = 3e-4,
-    verbose    = 1,
-    policy_kwargs = dict(
-        net_arch = [256, 256],   # 兩層 256 neuron 的全連接網路
-    ),
-)
+TOTAL_TIMESTEPS = 3_000_000
+CHECKPOINT_FREQ = 20_000
 
 
 def main():
-    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
-    os.makedirs(LOG_DIR,        exist_ok=True)
-
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"\n{'='*50}")
-    print(f"  訓練裝置: {device}")
-    if device == "cuda":
-        print(f"  GPU: {torch.cuda.get_device_name(0)}")
-        print(f"  VRAM: {torch.cuda.get_device_properties(0).total_memory // 1024**3} GB")
-    print(f"{'='*50}\n")
-
-    # ── 建立環境 ──────────────────────────────────────────────────────────
-    print("建立訓練環境...")
-    train_env = Monitor(PigPenEnv(WAYPOINTS_FILE), filename=os.path.join(LOG_DIR, "monitor"))
-
-    # 快速檢查觀察/動作空間定義有沒有問題
-    print("檢查環境介面...")
-    check_env(train_env, warn=True)
-    print("環境介面 ✓\n")
-
-    # ── Callbacks ─────────────────────────────────────────────────────────
-    checkpoint_cb = CheckpointCallback(
-        save_freq  = CHECKPOINT_FREQ,
-        save_path  = CHECKPOINT_DIR,
-        name_prefix= "ppo_pig_pen",
-        verbose    = 1,
-    )
-
-    # EvalCallback 已移除（會建立第二個環境與 Gazebo 衝突）
-
-    # ── 建立模型 ──────────────────────────────────────────────────────────
-    model = PPO(
-        "MlpPolicy",
-        train_env,
-        device         = "cpu",  # MlpPolicy 用 CPU 比 GPU 快
-        tensorboard_log= LOG_DIR,
-        **PPO_PARAMS,
-    )
-
-    print(f"模型架構：{PPO_PARAMS['policy_kwargs']['net_arch']}")
-    print(f"總訓練步數：{TOTAL_TIMESTEPS:,}")
-    print(f"Checkpoint 每 {CHECKPOINT_FREQ:,} 步儲存一次\n")
-    print("開始訓練！用 Ctrl-C 可中斷（最後一個 checkpoint 不會遺失）。")
-    print("TensorBoard：tensorboard --logdir logs/\n")
-
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--timesteps", type=int, default=TOTAL_TIMESTEPS, help="Additional training steps")
+    parser.add_argument("--config", type=Path, default=CONFIG_FILE)
+    parser.add_argument("--mode", choices=("corridor", "patrol"), default="corridor",
+                        help="patrol trains across all six branches; FSM maneuvers run between PPO decisions")
+    parser.add_argument("--checkpoint-dir", type=Path, help="Default: checkpoints_corridor38 or checkpoints_patrol38")
+    parser.add_argument("--log-dir", type=Path, help="Default: logs_corridor38 or logs_patrol38")
+    parser.add_argument("--resume", type=Path, help="Specific compatible 38-D model; default: latest v2 checkpoint")
+    parser.add_argument("--torch-threads", type=int, default=1, help="CPU threads for the small MLP (default: 1)")
+    parser.add_argument("--num-envs", type=int, default=1, help="Number of isolated Gazebo workers sharing this PPO (1..8)")
+    parser.add_argument("--domain-base", type=int, default=40)
+    parser.add_argument("--partition-prefix", default="4wd_parallel")
+    args = parser.parse_args()
+    if args.timesteps <= 0:
+        parser.error("--timesteps must be positive")
+    if args.torch_threads <= 0:
+        parser.error("--torch-threads must be positive")
+    if not 1 <= args.num_envs <= 8 or not 0 <= args.domain_base <= 101-args.num_envs:
+        parser.error("Use 1..8 environments and ROS domains in 0..100")
+    if not re.fullmatch(r"[a-zA-Z0-9_-]+", args.partition_prefix):
+        parser.error("Invalid partition prefix")
+    args.checkpoint_dir = args.checkpoint_dir or (CHECKPOINT_DIR if args.mode == "corridor" else CHECKPOINT_DIR.with_name("checkpoints_patrol38"))
+    args.log_dir = args.log_dir or (LOG_DIR if args.mode == "corridor" else LOG_DIR.with_name("logs_patrol38"))
+    resume = args.resume or latest_checkpoint(args.checkpoint_dir)
+    if resume is not None:
+        try:
+            resume = resolve_checkpoint(resume)
+        except FileNotFoundError as exc:
+            parser.error(f"{exc}\nFor a BC model, first run: python3 {Path(__file__).with_name('train_bc.py').resolve()}\n"
+                         "Recording demonstrations alone does not create a checkpoint; "
+                         "BC training must finish successfully before --resume.")
+    torch.set_num_threads(args.torch_threads)
+    print(f"PPO CPU threads: {args.torch_threads}")
+    args.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    args.log_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Training mode: {args.mode}; timesteps count PPO decisions, not FSM frames.", flush=True)
+    if args.num_envs > 1:
+        print(f"Parallel PPO: {args.num_envs} workers; ROS domains "
+              f"{args.domain_base}..{args.domain_base+args.num_envs-1}; partition prefix={args.partition_prefix}", flush=True)
+        env = TrainingVecEnv([WorkerFactory(i, args.domain_base, args.partition_prefix,
+                                           args.mode, args.config, args.log_dir) for i in range(args.num_envs)])
+        env.seed(0)
+    else:
+        raw_env = (PatrolTrainingEnv(config_file=args.config) if args.mode == "patrol"
+                   else PigPenEnv(mode="train", config_file=args.config))
+        metrics = ("success", "coverage", "return_rate", "failure_reason") if args.mode == "patrol" else ()
+        env = Monitor(raw_env, filename=str(args.log_dir / "monitor"), info_keywords=metrics)
+    rollout_steps = max(128, PPO_PARAMS["n_steps"] // args.num_envs)
+    model = None
     try:
-        model.learn(
-            total_timesteps = TOTAL_TIMESTEPS,
-            callback        = [checkpoint_cb],
-            progress_bar    = True,
-            reset_num_timesteps = True,
-        )
-    except KeyboardInterrupt:
-        print("\n訓練中斷，儲存當前模型...")
-
-    # 儲存最終模型
-    final_path = os.path.join(CHECKPOINT_DIR, "ppo_pig_pen_final")
-    model.save(final_path)
-    print(f"\n✓ 最終模型已儲存：{final_path}.zip")
-
-    train_env.close()
+        if resume:
+            print(f"Resume 38-D policy: {resume}")
+            model = PPO.load(str(resume), env=env, device="cpu", tensorboard_log=str(args.log_dir), n_steps=rollout_steps)
+            validate_model(model, env.observation_space, env.action_space)
+        else:
+            print("Start a new 38-D policy from scratch.")
+            model = PPO("MlpPolicy", env, device="cpu", tensorboard_log=str(args.log_dir),
+                        **dict(PPO_PARAMS, n_steps=rollout_steps))
+        if args.num_envs == 1:
+            check_env(env, warn=True)
+            env.start_training(model.num_timesteps, args.timesteps)
+        else:
+            env.env_method("start_training", 0,
+                           (args.timesteps + args.num_envs-1) // args.num_envs)
+        callback = CheckpointCallback(save_freq=max(1, CHECKPOINT_FREQ // args.num_envs), save_path=str(args.checkpoint_dir),
+                                      name_prefix="ppo_corridor38", verbose=1)
+        if args.num_envs > 1:
+            callback = [callback, ParallelProgress(model.num_timesteps, args.timesteps)]
+        try:
+            model.learn(total_timesteps=args.timesteps, callback=callback,
+                        progress_bar=True, reset_num_timesteps=resume is None)
+        except KeyboardInterrupt:
+            print("Training interrupted; saving the current policy.")
+        except Exception:
+            emergency = args.checkpoint_dir / "ppo_corridor38_interrupted"
+            model.save(str(emergency))
+            print(f"Training failed; saved the current policy to {emergency}.zip", flush=True)
+            raise
+        model.save(str(args.checkpoint_dir / "ppo_corridor38_final"))
+    finally:
+        env.close()
 
 
 if __name__ == "__main__":
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+    signal.signal(signal.SIGTERM, signal.default_int_handler)
     main()

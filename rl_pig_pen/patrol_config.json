@@ -1,0 +1,22 @@
+{
+  "world_name": "pig_pen_16units_world",
+  "model_name": "wheeltec_mini",
+  "start": [0.0, -14.0, 1.5707963267948966],
+  "junctions": 3,
+  "lidar_yaw": 0.0,
+  "control_dt": 0.08333333333333333,
+  "half_length": 0.23,
+  "half_width": 0.21,
+  "collision_margin": 0.02,
+  "stop_margin": 0.18,
+  "open_distance": 1.5,
+  "wall_distance": 1.0,
+  "confirm_frames": 3,
+  "junction_advance": 0.32,
+  "min_main_run": 2.5,
+  "min_branch_run": 2.5,
+  "max_branch_run": 6.0,
+  "return_takeover": 1.1,
+  "cruise_speed": 0.2,
+  "turn_speed": 0.6
+}

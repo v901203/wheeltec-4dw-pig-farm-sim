@@ -4583,5 +4583,10 @@
       <pose>2.275 7.275 0.27 0 0 3.1416</pose>
     </include>
 
-  </world>
+    <physics name="1ms" type="ignored">
+    <max_step_size>0.001</max_step_size>
+    <real_time_factor>3</real_time_factor>
+    <real_time_update_rate>1000</real_time_update_rate>
+  </physics>
+</world>
 </sdf>

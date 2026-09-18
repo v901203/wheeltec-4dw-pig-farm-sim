@@ -1,293 +1,302 @@
-"""
-pig_pen_env.py — Gymnasium 環境，對接 Gazebo Fortress 豬舍模擬場景
+"""38-D LiDAR environment: corridor PPO training or hybrid patrol evaluation.
 
-觀察空間（39 維 float32）：
-  [0:36]  36 條 LiDAR 射線（從 /scan 均勻取樣），正規化到 [0, 1]
-  [36]    到下一個路徑點的距離 / 30（正規化）
-  [37]    到下一個路徑點的方向角 sin 值（機器人座標系）
-  [38]    到下一個路徑點的方向角 cos 值（機器人座標系）
-
-動作空間（2 維 float32）：
-  [0]  線速度 ∈ [0,  0.5] m/s
-  [1]  角速度 ∈ [-1.5, 1.5] rad/s
-
-獎勵：
-  +5 × 本步靠近路徑點的距離（公尺）
-  +50  到達一個路徑點（距離 < REACH_DIST）
-  +200 完成整條巡邏路線
-  -100 碰撞（任一 LiDAR 射線 < COLL_DIST）
-  -0.01 每步的時間懲罰
+Corridor training uses only PPO actions. PatrolTrainingEnv groups deterministic
+FSM maneuvers between PPO decisions for full-route training.
 """
 
 import math
-import json
-import time
-import threading
 import subprocess
-from pathlib import Path
+import threading
+import time
 
-import numpy as np
 import gymnasium as gym
-
+import numpy as np
 import rclpy
+from geometry_msgs.msg import Twist
+from nav_msgs.msg import Odometry
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
+from rclpy.signals import SignalHandlerOptions
 from sensor_msgs.msg import LaserScan
-from nav_msgs.msg import Odometry
-from geometry_msgs.msg import Twist
 
-# ── 環境參數（可依現場調整） ────────────────────────────────────────────
-N_LIDAR    = 36       # 取樣的 LiDAR 射線數量
-MAX_RANGE  = 10.0     # LiDAR 最大量測距離 (m)，超過就截斷
-MAX_LIN    = 0.5      # 最大線速度 (m/s)
-MAX_ANG    = 1.5      # 最大角速度 (rad/s)
-REACH_DIST = 0.8      # 距路徑點此距離內算「到達」(m)
-COLL_DIST  = 0.35     # LiDAR 射線小於此值視為碰撞 (m)
-MAX_STEPS  = 3000     # 每個 episode 最多步數
-
-WORLD_NAME = "pig_pen_16units_world"   # 對應 pig_pen_16units.world 的 world name
-MODEL_NAME = "wheeltec_mini"           # 對應 launch_clean.sh 裡的 MODEL
+from navigation import (CONFIG_FILE, MAX_ANG, MAX_LIN, N_LIDAR, SensorFault,
+                        collision_detected, load_config, local_reward,
+                        safe_command, scan_features, wrap_angle)
+from patrol_controller import PatrolController
+from policy_config import policy_spaces
 
 
-# ── 內部 ROS2 節點 ──────────────────────────────────────────────────────
+def _stamp(message):
+    return message.header.stamp.sec + message.header.stamp.nanosec * 1e-9
+
+
+def _pose(odom):
+    p, q = odom.pose.pose.position, odom.pose.pose.orientation
+    yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y*q.y + q.z*q.z))
+    result = (p.x, p.y, yaw)
+    if not all(math.isfinite(v) for v in (*result, odom.twist.twist.linear.x)):
+        raise SensorFault("Non-finite odometry")
+    return result
+
+
 class _RosNode(Node):
-    """只負責收發資料的輕量節點，由獨立 thread 執行 spin。"""
-
     def __init__(self):
         super().__init__("pig_pen_rl_env_node")
-        self._lock   = threading.Lock()
-        self._scan: LaserScan | None = None
-        self._odom: Odometry  | None = None
+        self.condition = threading.Condition()
+        self.scan = self.odom = None
+        self.scan_received = self.odom_received = 0.0
+        self.create_subscription(LaserScan, "/scan", self._scan_cb, qos_profile_sensor_data)
+        self.create_subscription(Odometry, "/odom", self._odom_cb, qos_profile_sensor_data)
+        self.publisher = self.create_publisher(Twist, "/cmd_vel", 10)
 
-        self.create_subscription(LaserScan, "/scan", self._scan_cb, 10)
-        self.create_subscription(Odometry,  "/odom", self._odom_cb, 10)
-        self._cmd_pub = self.create_publisher(Twist, "/cmd_vel", 10)
+    def _scan_cb(self, msg):
+        with self.condition:
+            self.scan, self.scan_received = msg, time.monotonic()
+            self.condition.notify_all()
 
-    def _scan_cb(self, msg: LaserScan):
-        with self._lock:
-            self._scan = msg
-
-    def _odom_cb(self, msg: Odometry):
-        with self._lock:
-            self._odom = msg
+    def _odom_cb(self, msg):
+        with self.condition:
+            self.odom, self.odom_received = msg, time.monotonic()
+            self.condition.notify_all()
 
     def get_data(self):
-        with self._lock:
-            return self._scan, self._odom
+        with self.condition:
+            return self.scan, self.odom, self.scan_received, self.odom_received
 
-    def publish_cmd(self, vx: float, wz: float):
-        t = Twist()
-        t.linear.x  = float(vx)
-        t.angular.z = float(wz)
-        self._cmd_pub.publish(t)
-
-
-# ── 工具函式 ────────────────────────────────────────────────────────────
-def _teleport(x: float, y: float, yaw: float = 0.0):
-    """
-    透過 ign service 把模型 teleport 到指定世界座標。
-    適用於 Gazebo Fortress（ign gazebo 6.x）。
-    """
-    qz = math.sin(yaw / 2.0)
-    qw = math.cos(yaw / 2.0)
-    req = (
-        f'name: "{MODEL_NAME}" '
-        f'position: {{x: {x:.4f}, y: {y:.4f}, z: 0.05}} '
-        f'orientation: {{x: 0.0, y: 0.0, z: {qz:.6f}, w: {qw:.6f}}}'
-    )
-    result = subprocess.run(
-        [
-            "ign", "service", "-s",
-            f"/world/{WORLD_NAME}/set_pose",
-            "--reqtype", "ignition.msgs.Pose",
-            "--reptype", "ignition.msgs.Boolean",
-            "--timeout", "3000",
-            "--req", req,
-        ],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        print(f"[WARN] teleport 失敗: {result.stderr.strip()}")
+    def publish_cmd(self, vx, wz):
+        msg = Twist()
+        msg.linear.x, msg.angular.z = float(vx), float(wz)
+        self.publisher.publish(msg)
 
 
-# ── Gymnasium 環境 ──────────────────────────────────────────────────────
+def _teleport(cfg, pose):
+    x, y, yaw = pose
+    request = (f'name: "{cfg.model_name}" position: {{x: {x:.6f}, y: {y:.6f}, z: 0.05}} '
+               f'orientation: {{z: {math.sin(yaw / 2):.8f}, w: {math.cos(yaw / 2):.8f}}}')
+    command = ["ign", "service", "-s", f"/world/{cfg.world_name}/set_pose",
+               "--reqtype", "ignition.msgs.Pose", "--reptype", "ignition.msgs.Boolean",
+               "--timeout", "5000", "--req", request]
+    last_error = ""
+    for attempt in range(3):
+        result = subprocess.run(command, capture_output=True, text=True, timeout=8)
+        if result.returncode == 0 and "data: true" in result.stdout:
+            return
+        last_error = f"{result.stderr.strip()} {result.stdout.strip()}".strip()
+        if attempt < 2:
+            time.sleep(0.2)
+    raise RuntimeError(f"Gazebo reset failed after 3 attempts: {last_error}")
+
+
 class PigPenEnv(gym.Env):
-    """
-    Gymnasium-v0.26+ 相容環境。
-    需要先執行 calibrate_waypoints.py 產生 waypoints.json，
-    以及先啟動 launch_clean.sh。
-    """
-
     metadata = {"render_modes": []}
 
-    def __init__(self, waypoints_file: str = "waypoints.json"):
+    def __init__(self, *, mode="train", config_file=CONFIG_FILE):
         super().__init__()
-
-        # 讀取路徑點
-        data = json.loads(Path(waypoints_file).read_text())
-        self._start      = data["start"]   # {world_x, world_y, world_yaw}
-        self._waypoints  = [(wp["x"], wp["y"]) for wp in data["patrol_waypoints"]]
-        self._n_wp       = len(self._waypoints)
-
-        # ── 觀察空間 ─────────────────────────────────────────────────────
-        # [LiDAR × N_LIDAR] + [dist_norm, sin(angle), cos(angle)]
-        obs_low  = np.zeros(N_LIDAR + 3, dtype=np.float32)
-        obs_high = np.ones (N_LIDAR + 3, dtype=np.float32)
-        obs_low [N_LIDAR + 1] = -1.0   # sin 可以是負數
-        self.observation_space = gym.spaces.Box(
-            low=obs_low, high=obs_high, dtype=np.float32
-        )
-
-        # ── 動作空間 ─────────────────────────────────────────────────────
-        self.action_space = gym.spaces.Box(
-            low =np.array([0.0,    -MAX_ANG], dtype=np.float32),
-            high=np.array([MAX_LIN, MAX_ANG], dtype=np.float32),
-        )
-
-        # ── ROS2 ─────────────────────────────────────────────────────────
-        if not rclpy.ok():
-            rclpy.init()
+        if mode not in ("train", "patrol"):
+            raise ValueError("mode must be 'train' or 'patrol'")
+        self.mode, self.cfg = mode, load_config(config_file)
+        self.observation_space, self.action_space = policy_spaces()
+        self._owns_ros = not rclpy.ok()
+        if self._owns_ros:
+            # Let Python handle Ctrl-C so PPO can save before ROS is closed.
+            rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
         self._ros = _RosNode()
         self._executor = SingleThreadedExecutor()
         self._executor.add_node(self._ros)
-        self._spin_thread = threading.Thread(
-            target=self._executor.spin, daemon=True
-        )
+        self._spin_thread = threading.Thread(target=self._executor.spin, daemon=True)
         self._spin_thread.start()
+        self.controller = PatrolController(self.cfg)
+        self._closed = False
+        self._episode_done = True
+        self._last_obs = np.zeros(N_LIDAR + 2, dtype=np.float32)
 
-        # ── 回合狀態 ─────────────────────────────────────────────────────
-        self._wp_idx    = 0
-        self._prev_dist = 0.0
-        self._steps     = 0
+    def _wait_sensor(self, min_stamp=None, timeout=None, min_received=None):
+        timeout = self.cfg.sensor_timeout if timeout is None else timeout
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            scan, odom, scan_received, odom_received = self._ros.get_data()
+            now = time.monotonic()
+            if (scan is not None and odom is not None and
+                    now - min(scan_received, odom_received) < self.cfg.sensor_timeout and
+                    (min_received is None or min(scan_received, odom_received) > min_received)):
+                stamp = _stamp(scan)
+                if ((min_stamp is None or stamp >= min_stamp - 0.001) and
+                        abs(_stamp(odom) - stamp) <= 0.10):
+                    _pose(odom)
+                    return scan, odom
+            with self._ros.condition:
+                self._ros.condition.wait(timeout=0.02)
+        self._ros.publish_cmd(0.0, 0.0)
+        raise SensorFault("Timed out waiting for fresh synchronized /scan and /odom")
 
-    # ── 內部工具 ─────────────────────────────────────────────────────────
+    def _training_spawn(self):
+        """Reset locations only; never navigation targets or observation inputs.
 
-    def _wait_sensor(self, timeout: float = 8.0):
-        t0 = time.time()
-        while time.time() - t0 < timeout:
-            scan, odom = self._ros.get_data()
-            if scan is not None and odom is not None:
-                return
-            time.sleep(0.05)
-        raise RuntimeError("等待 /scan 或 /odom 超時，請確認 launch_clean.sh 已啟動。")
-
-    def _robot_pose(self):
-        """回傳機器人在 odom 座標系的 (x, y, yaw)。"""
-        _, odom = self._ros.get_data()
-        p   = odom.pose.pose.position
-        q   = odom.pose.pose.orientation
-        yaw = math.atan2(
-            2.0 * (q.w * q.z + q.x * q.y),
-            1.0 - 2.0 * (q.y ** 2 + q.z ** 2),
-        )
-        return p.x, p.y, yaw
-
-    def _dist_and_bearing(self):
-        """到當前目標路徑點的距離與相對方位角（機器人座標系）。"""
-        rx, ry, ryaw = self._robot_pose()
-        wx, wy = self._waypoints[self._wp_idx]
-        dx, dy = wx - rx, wy - ry
-        dist   = math.hypot(dx, dy)
-        angle  = math.atan2(dy, dx) - ryaw
-        # 正規化到 [-π, π]
-        angle  = math.atan2(math.sin(angle), math.cos(angle))
-        return dist, angle
-
-    def _lidar_obs(self) -> np.ndarray:
-        """取樣 N_LIDAR 條射線，正規化到 [0, 1]。"""
-        scan, _ = self._ros.get_data()
-        arr = np.asarray(scan.ranges, dtype=np.float32)
-        arr = np.nan_to_num(arr, nan=MAX_RANGE, posinf=MAX_RANGE, neginf=0.0)
-        arr = np.clip(arr, 0.0, MAX_RANGE)
-        idx = np.round(np.linspace(0, len(arr) - 1, N_LIDAR)).astype(int)
-        return arr[idx] / MAX_RANGE
-
-    def _build_obs(self) -> np.ndarray:
-        lidar       = self._lidar_obs()
-        dist, angle = self._dist_and_bearing()
-        extra = np.array(
-            [min(dist / 30.0, 1.0), math.sin(angle), math.cos(angle)],
-            dtype=np.float32,
-        )
-        return np.concatenate([lidar, extra])
-
-    def _is_collision(self) -> bool:
-        scan, _ = self._ros.get_data()
-        arr = np.asarray(scan.ranges, dtype=np.float32)
-        arr = np.nan_to_num(arr, nan=MAX_RANGE, posinf=MAX_RANGE, neginf=MAX_RANGE)
-        return bool(np.any(arr < COLL_DIST))
-
-    # ── Gymnasium API ─────────────────────────────────────────────────────
+        These corridor interiors match pig_pen_16units.world. A different world
+        requires new reset sampling and topology/threshold configuration.
+        """
+        if self.cfg.world_name != "pig_pen_16units_world":
+            raise ValueError("Training reset sampler currently supports pig_pen_16units_world only")
+        if self.np_random.random() < 0.5:
+            x, y = 0.0, float(self.np_random.choice([-10.0, -8.5, -4.0, -2.5, 2.5, 4.0, 8.5, 10.0]))
+            yaw = float(self.np_random.choice([-math.pi / 2, math.pi / 2]))
+        else:
+            x = float(self.np_random.choice([-2.5, 2.5]))
+            # Cross aisles lie BETWEEN pen rows; main-aisle y samples would
+            # place this lateral x inside a pen, even if LiDAR sees two walls.
+            y = float(self.np_random.choice([-6.18, 0.0, 6.18]))
+            yaw = float(self.np_random.choice([0.0, math.pi]))
+        lateral = self.np_random.uniform(-0.08, 0.08)
+        return (x - lateral * math.sin(yaw), y + lateral * math.cos(yaw),
+                yaw + self.np_random.uniform(-0.12, 0.12))
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
-
-        # 停車 → teleport 回起點 → 等穩定
+        self._episode_done = True
         self._ros.publish_cmd(0.0, 0.0)
-        _teleport(
-            self._start["world_x"],
-            self._start["world_y"],
-            self._start["world_yaw"],
-        )
-        time.sleep(0.8)   # 等 Gazebo physics 穩定
-
-        self._wait_sensor()
-        self._wp_idx    = 0
-        self._steps     = 0
-        self._prev_dist, _ = self._dist_and_bearing()
-
-        return self._build_obs(), {}
+        self._wait_sensor(timeout=8.0)
+        attempts = self.cfg.reset_attempts if self.mode == "train" else 1
+        for attempt in range(1, attempts + 1):
+            spawn = self._training_spawn() if self.mode == "train" else self.cfg.start
+            self._ros.publish_cmd(0.0, 0.0)
+            _teleport(self.cfg, spawn)
+            # The service accepts the pose asynchronously. Start settling from
+            # messages received AFTER its reply, never from the pre-reset cache.
+            current, _ = self._wait_sensor(min_received=time.monotonic(), timeout=8.0)
+            scan, odom = self._wait_sensor(min_stamp=_stamp(current) + 0.5, timeout=8.0)
+            confirmed = 0
+            for frame in range(self.cfg.reset_validation_frames):
+                self._ros.publish_cmd(0.0, 0.0)
+                try:
+                    features = scan_features(scan, self.cfg)
+                    collision = collision_detected(features, self.cfg)
+                    corridor = self.mode != "train" or features.walls_present(self.cfg)
+                    valid = not collision and corridor
+                    diagnostic = (f"left={features.left_edge_m:.3f}m, "
+                                  f"right={features.right_edge_m:.3f}m, "
+                                  f"wall_limit={self.cfg.wall_distance:.3f}m, collision={collision}")
+                except SensorFault as exc:
+                    valid = False
+                    diagnostic = str(exc)
+                confirmed = confirmed + 1 if valid else 0
+                if confirmed >= self.cfg.confirm_frames:
+                    break
+                if frame + 1 < self.cfg.reset_validation_frames:
+                    scan, odom = self._wait_sensor(min_stamp=_stamp(scan) + self.cfg.control_dt)
+            if confirmed >= self.cfg.confirm_frames:
+                break
+            self._ros.get_logger().warning(
+                f"[重生重試] 起點檢查失敗 {attempt}/{attempts}，座標 {spawn}: {diagnostic}")
+        else:
+            # Do not accept a collision, open-space reset or broken sensor as a
+            # training corridor. Exhausted retries remain a diagnostic failure.
+            self._ros.publish_cmd(0.0, 0.0)
+            raise RuntimeError(
+                f"Unable to validate {self.mode} reset after {attempts} attempt(s); "
+                f"last spawn={spawn}: {diagnostic}. Check world geometry and LiDAR.")
+        pose, stamp = _pose(odom), _stamp(scan)
+        self.controller.reset(pose, stamp)
+        self._steps = 0
+        self._last_stamp = stamp
+        self._motion_pose, self._motion_stamp = pose, stamp
+        self._last_obs = features.observation
+        self._latest_snapshot = (scan, odom)
+        self._episode_done = False
+        return self._last_obs.copy(), {"mode": self.mode, "reset_attempts": attempt,
+                                       "reset_validation_frames": frame + 1, "spawn": tuple(spawn)}
 
     def step(self, action):
-        # 執行動作
-        vx = float(np.clip(action[0], 0.0,    MAX_LIN))
-        wz = float(np.clip(action[1], -MAX_ANG, MAX_ANG))
-        self._ros.publish_cmd(vx, wz)
-        time.sleep(0.1)   # 10 Hz 控制頻率
+        if self._episode_done:
+            raise RuntimeError("Call reset() before step() or after episode completion")
+        try:
+            return self._step(action)
+        except SensorFault as exc:
+            self._ros.publish_cmd(0.0, 0.0)
+            self._episode_done = True
+            info = self.controller.info() if self.mode == "patrol" else {}
+            info.update(success=False, failure_reason="sensor_fault", sensor_error=str(exc))
+            return self._last_obs.copy(), 0.0, False, True, info
+        except BaseException:
+            self._ros.publish_cmd(0.0, 0.0)
+            raise
 
+    def _step(self, action, *, snapshot=None, arbitrate=True):
+        scan, odom = self._wait_sensor() if snapshot is None else snapshot
+        self._latest_snapshot = (scan, odom)
+        features = scan_features(scan, self.cfg)
+        info = {"success": False, "mode": self.mode}
+        if collision_detected(features, self.cfg):
+            self._ros.publish_cmd(0.0, 0.0)
+            self._episode_done = True
+            if self.mode == "patrol":
+                info.update(self.controller.info())
+            info.update(collision=True, success=False, failure_reason="collision")
+            return features.observation, -100.0, True, False, info
+
+        command = action
+        owner = "rl"
+        if self.mode == "patrol":
+            override = self.controller.command(features, _pose(odom), _stamp(scan)) if arbitrate else None
+            if override is not None:
+                command, owner = override, "fsm"
+            info.update(self.controller.info())
+            if self.controller.state in ("DONE", "FAILED"):
+                self._ros.publish_cmd(0.0, 0.0)
+                self._episode_done = True
+                return features.observation, 0.0, True, False, info
+
+        command, blocked = safe_command(command, features, self.cfg, odom.twist.twist.linear.x)
+        self._ros.publish_cmd(*command)
+        # One fresh LiDAR frame per nominal 1/12 simulated second. No RTF guess.
+        scan, odom = self._wait_sensor(min_stamp=_stamp(scan) + self.cfg.control_dt)
+        self._latest_snapshot = (scan, odom)
+        # Stop while PPO computes/updates; it may take many simulated seconds.
+        self._ros.publish_cmd(0.0, 0.0)
+        features = scan_features(scan, self.cfg)
+        pose, stamp = _pose(odom), _stamp(scan)
         self._steps += 1
-        obs           = self._build_obs()
-        curr_dist, _  = self._dist_and_bearing()
-        terminated    = False
-        truncated     = False
-        info: dict    = {}
-
-        # ── 獎勵計算 ─────────────────────────────────────────────────────
-        # 1. 靠近路徑點的進度獎勵
-        reward = (self._prev_dist - curr_dist) * 5.0
-        self._prev_dist = curr_dist
-
-        # 2. 到達路徑點
-        if curr_dist < REACH_DIST:
-            reward += 50.0
-            self._wp_idx += 1
-            info["waypoints_done"] = self._wp_idx
-
-            if self._wp_idx >= self._n_wp:
-                # 完成整條巡邏路線
-                reward    += 200.0
-                terminated = True
-                info["success"] = True
-            else:
-                # 更新下一個路徑點的距離基準
-                self._prev_dist, _ = self._dist_and_bearing()
-
-        # 3. 碰撞
-        if not terminated and self._is_collision():
-            reward    -= 100.0
-            terminated = True
-            info["collision"] = True
-
-        # 4. 時間懲罰
-        reward -= 0.01
-
-        # 5. 達到最大步數
-        if self._steps >= MAX_STEPS:
+        collision = collision_detected(features, self.cfg)
+        corridor = max(features.left_edge_m, features.right_edge_m) <= self.cfg.open_distance
+        reward = local_reward(odom.twist.twist.linear.x, features.balance_m, collision, corridor)
+        terminated, truncated = collision, False
+        info.update(controller=owner, safety_stop=blocked, collision=collision,
+                    balance_m=features.balance_m, front_clearance_m=features.front_m,
+                    actual_dt=stamp - self._last_stamp)
+        if collision:
+            info.update(success=False, failure_reason="collision")
+        if self.mode == "train":
+            # End the PPO segment BEFORE an FSM-controlled maneuver is needed.
+            if not corridor and not collision:
+                truncated = True
+                info["segment_complete"] = True
+            moved = math.hypot(pose[0] - self._motion_pose[0], pose[1] - self._motion_pose[1])
+            turned = abs(wrap_angle(pose[2] - self._motion_pose[2]))
+            if moved > 0.05 or turned > 0.08:
+                self._motion_pose, self._motion_stamp = pose, stamp
+            if stamp - self._motion_stamp > self.cfg.stuck_seconds and not collision:
+                truncated = True
+                info["failure_reason"] = "stuck"
+                info.update(motion_distance_m=moved, motion_angle_rad=turned,
+                            no_motion_sim_seconds=stamp-self._motion_stamp)
+        limit = self.cfg.train_max_steps if self.mode == "train" else self.cfg.patrol_max_steps
+        if self._steps >= limit and not terminated:
             truncated = True
-
-        return obs, float(reward), terminated, truncated, info
+            info["failure_reason"] = "time_limit"
+        self._last_stamp, self._last_obs = stamp, features.observation
+        self._episode_done = terminated or truncated
+        hook = getattr(self, "progress_hook", None)
+        if hook is not None:
+            hook()
+        return features.observation.copy(), reward, terminated, truncated, info
 
     def close(self):
+        if self._closed:
+            return
         self._ros.publish_cmd(0.0, 0.0)
+        self._executor.shutdown(timeout_sec=2.0)
+        self._spin_thread.join(timeout=2.0)
         self._ros.destroy_node()
+        if self._owns_ros and rclpy.ok():
+            rclpy.shutdown()
+        self._closed = True
