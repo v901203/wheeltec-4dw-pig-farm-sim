@@ -151,10 +151,16 @@ cd ~/Desktop/4wd/scripts
 
 ~~~bash
 cd ~/Desktop/4wd/scripts
-./launch_rl_training.sh
+./launch_rl_training.sh --mode patrol --timesteps 300000
 ~~~
 
-自動執行：啟動無頭模擬 → 等待環境就緒 → 首次使用自動校準路徑點 → 啟動 TensorBoard → 開始 PPO 訓練。
+自動執行：開啟 Gazebo 視窗 → 等待環境就緒 → 啟動 TensorBoard → 開始整圖 PPO＋狀態機巡邏訓練。
+`--mode patrol` 在同一回合巡邏六條支線並返回；省略時使用走道片段訓練。
+動作支援原地左右旋轉，路口轉向與末端掉頭由狀態機執行。不需要校準路徑點。
+預設開窗，只有指定 `--headless` 才使用無視窗模式。詳細流程見 [整圖訓練說明](rl_pig_pen/README.md)。
+訓練也會另開終端機，每 15 秒顯示進度與數據，每回合列出中文重生原因與累計次數。
+按 Ctrl-C 可中止並存檔；輸出同步存到 `logs/rl_training_*.log`。
+加 `--same-terminal` 可使用原本的終端機。
 
 ### 手動場景與車型控制
 
@@ -186,125 +192,111 @@ ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -r cmd_vel:=/cmd
 
 ---
 
-## 5. 強化學習訓練 (RL Pipeline)
+## 5. 強化學習與完整巡邏
 
-使用 **PPO（Proximal Policy Optimization）** 訓練豬舍巡邏策略，透過 Stable-Baselines3 與 Gazebo 模擬對接。
+採用 **38 維感測 PPO ＋巡邏狀態機**。RL 負責一般走道前進、置中與避障；
+狀態機負責路口進出、穿越、掉頭，以及 3 個路口兩側共 6 個端點的巡邏記憶。
+不需要 `waypoints.json` 或互動式路徑點校準。`/odom` 仍用於實測速度、相對轉角和短程距離。
 
-### 架構概覽
-
-```
-launch_rl_training.sh
-├── launch_clean.sh --headless     # Gazebo 無頭模擬
-├── calibrate_waypoints.py         # 首次校準路徑點（互動式）
-├── tensorboard                    # 訓練監控（背景）
-└── train_ppo.py                   # PPO 訓練主程式
-    └── pig_pen_env.py             # Gymnasium 環境（Gazebo 對接）
-```
-
-### 觀察空間 / 動作空間 / 獎勵函數
-
-| 項目 | 內容 |
+| 項目 | 定義 |
 | :--- | :--- |
-| **觀察空間**（39 維） | 36 條 LiDAR 射線（均勻取樣，正規化至 [0,1]）+ 到下個路徑點距離 + sin/cos 方位角 |
-| **動作空間**（連續 2 維） | 線速度 ∈ [0, 0.5] m/s；角速度 ∈ [-1.5, 1.5] rad/s |
-| **進度獎勵** | +5 × 靠近路徑點距離（公尺） |
-| **到達路徑點** | +50 |
-| **完成全程巡邏** | +200 |
-| **碰撞懲罰** | -100，episode 終止 |
-| **時間懲罰** | -0.01 / step |
+| 觀察 `0:36` | 36 條均勻取樣 LiDAR，截斷至 10 m 並除以 10 |
+| 觀察 `36` | 左側 60°～120° 平均距離減右側 −120°～−60° 平均距離，除以 10，範圍 [-1,1] |
+| 觀察 `37` | 前方 ±30° 最小距離除以 10，範圍 [0,1] |
+| 動作 | 線速度 [0,1] m/s、角速度 [-2,2] rad/s |
+| 一般走道獎勵 | `2 × odom 實測前向速度 − abs(左右平均距離差，公尺) − 0.05` |
+| 碰撞代理判定 | LiDAR 點侵入含輪子的矩形車體及裕量：獎勵精確為 −100、終止並停車 |
 
-### 巡邏路線設計
+新特徵與安全檢查使用完整掃描。前進獎勵不使用命令速度。
+到達開口即結束訓練片段，該步不扣置中分；狀態機動作不進入 PPO 訓練。
+支線末端使用「已走過最低距離＋兩側欄舍結束」辨識，前方障礙物不算完成。
+只有所有端點都到達且返回、再抵達主幹道末端，才算整體成功。
 
-機器人從走道右端出發，依序拜訪主幹道與 3 條支線的上下端，最終抵達走道左端，共 16 個路徑點：
+### 訓練與試跑
 
+~~~bash
+# 一鍵啟動模擬、TensorBoard 與走道 PPO 訓練
+bash scripts/launch_rl_training.sh
+
+# 或在已啟動 launch_clean.sh 的模擬中訓練
+python3 rl_pig_pen/train_ppo.py --timesteps 3000000
+
+# 訓練結束後，在已啟動的模擬中測試完整巡邏
+python3 rl_pig_pen/test_model.py --episodes 3
+~~~
+
+預設只從 `rl_pig_pen/checkpoints_corridor38/` 自動選取最新新版模型續訓；
+舊的 39 維模型保留在原資料夾，不直接續訓。可用 `--resume PATH` 指定相容模型。
+TensorBoard 目錄為 `rl_pig_pen/logs_corridor38/`，每 20,000 步存一次模型。
+維持 PPO `[256,256]` 網路、2048 rollout steps、512 batch size、CPU 執行。
+訓練模式預設目標 6 倍速、停用三個相機並使用單執行緒 MLP；物理步長與 LiDAR
+取樣率維持原設定。可用 `bash scripts/launch_rl_training.sh --rtf 6` 調整倍率，
+實際速度仍須以 PPO 的 `fps` 衡量。
+訓練和測試不可同時控制同一個模擬。
+
+感測步進依雷達時間戳，名義週期為 1/12 模擬秒，不使用固定三倍速假設。
+自由運行的 Gazebo 仍可能有排程延遲，`info["actual_dt"]` 提供實際間隔；
+每次取樣後送出停車命令，避免模型更新期間持續行駛。
+
+完整參數、限制與測試方式見 [RL 設計說明](rl_pig_pen/README.md)。
+
+### 最新模型存檔
+
+目前最新的整圖 PPO 實驗存檔為：
+
+```text
+rl_pig_pen/checkpoints_patrol38/ppo_corridor38_interrupted.zip
 ```
-起點(右端) → 路口1 → 支線1上端 → 支線1下端 → 路口2 → 支線2上端 → 支線2下端
-→ 路口3 → 支線3上端 → 支線3下端 → 終點(左端)
+
+這是中斷時保存的 checkpoint，目標為 300,000 步，但尚未完成訓練與成功巡邏驗證；
+最近回合完成率為 `0/6`，主要結束原因是 `stuck`。載入測試：
+
+```bash
+python3 rl_pig_pen/test_model.py \
+  --model rl_pig_pen/checkpoints_patrol38/ppo_corridor38_interrupted.zip \
+  --episodes 3
 ```
 
-### 步驟 1：路徑點校準（首次使用）
-
-`launch_rl_training.sh` 首次執行會自動觸發校準。若需手動重新校準：
-
-~~~bash
-# 刪除舊的路徑點檔案
-rm ~/Desktop/4wd/rl_pig_pen/waypoints.json
-
-# 重新執行（腳本會自動進入校準模式）
-cd ~/Desktop/4wd/scripts
-./launch_rl_training.sh
-~~~
-
-校準工具（`calibrate_waypoints.py`）特性：
-* 每記錄一個點立刻寫入 `waypoints_partial.json`（防崩潰遺失）
-* 重新執行會詢問是否從斷點繼續，無需從頭來
-
-### 步驟 2：開始訓練
-
-~~~bash
-cd ~/Desktop/4wd/scripts
-./launch_rl_training.sh
-~~~
-
-訓練過程監控（另開 Terminal）：
-
-~~~bash
-tensorboard --logdir ~/Desktop/4wd/rl_pig_pen/logs/
-# 開瀏覽器：http://localhost:6006
-~~~
-
-### 訓練輸出
-
-| 路徑 | 內容 |
-| :--- | :--- |
-| `rl_pig_pen/checkpoints/` | 每 20,000 步儲存一次的模型權重 |
-| `rl_pig_pen/checkpoints/best/` | EvalCallback 評估最佳模型（停用中，見下注） |
-| `rl_pig_pen/logs/` | TensorBoard 訓練曲線 |
-
-> **注意**：`EvalCallback` 已停用（會建立第二個 Gazebo 環境造成衝突）。如需評估，訓練完後手動載入模型測試。
-
-### RL 訓練超參數（`train_ppo.py`）
-
-| 參數 | 值 | 說明 |
-| :--- | :--- | :--- |
-| `TOTAL_TIMESTEPS` | 3,000,000 | 約需 3–5 天（單環境，10 FPS） |
-| `n_steps` | 2048 | 每次更新蒐集的步數 |
-| `batch_size` | 512 | mini-batch 大小 |
-| `learning_rate` | 3e-4 | Adam 學習率 |
-| `net_arch` | [256, 256] | 兩層全連接網路 |
-| `device` | cpu | MlpPolicy 用 CPU 比 GPU 快（GPU 適合 CNN 影像輸入） |
+模型檔已納入 GitHub repository；訓練日誌與示範資料仍由 `.gitignore` 排除。
 
 ---
 
-## 6. 行為複製 (Behavioral Cloning)
+## 6. 手動示範與行為複製 (Behavioral Cloning)
 
-> **狀態**：規劃中，尚未實作。以下為預計流程，待錄製足夠的人工駕駛資料後啟用。
+已支援「手動錄製 → 離線 BC 預訓練 → PPO 續訓」。使用同一套 38 維觀察與
+`[線速度, 角速度]` 動作，BC 模型可直接由現有 PPO 載入。
 
-### 1. 錄製手動駕駛資料
-
-啟動模擬後，開啟錄製腳本，手動駕駛小車在走道巡邏以收集 `/scan` 雷達資料與對應速度指令：
-
-~~~bash
-python3 scripts/teleop_recorder.py
-~~~
-
-*(資料將自動存為 `.npz` 格式於 `recorded_data/` 目錄中)*
-
-### 2. GPU 加速行為複製訓練
-
-讀取錄製的專家資料，於 GPU 上預訓練神經網路 Policy：
+先在原訓練終端按 Ctrl-C 並等待存檔、清理完成。從專案根目錄，在三個終端依序執行：
 
 ~~~bash
-python3 scripts/train_bc_model.py
+# 終端 1：手動示範用 1 倍目標速度，開啟 Gazebo 畫面
+bash scripts/launch_clean.sh --rtf 1
+
+# 終端 2：只讀取 /scan 與人工 /cmd_vel，不會自行控制車子
+python3 rl_pig_pen/record_demonstrations.py
+
+# 終端 3：鍵盤駕駛；持續按住 i/u/o 等移動鍵以持續送出指令
+ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -p speed:=0.2 -p turn:=0.5
 ~~~
 
-### 3. 走道巡邏控制節點
-
-測試純雷達相對距離的走道自動巡邏與到底轉向邏輯：
+示範走道內的直行、偏左／偏右後的修正與減速避障。`i` 向前，`u/o` 向前左／右轉，
+`k` 停車。倒車、原地轉向與路口開放區域不納入這個局部策略，路口選向仍由狀態機處理。
+錄完先停車、結束鍵盤，再於錄製終端按 Ctrl-C 儲存尾段。建議分成數段獨立示範，
+包含兩側偏移與不同走道；有效樣本數會顯示在終端。資料放在 `rl_pig_pen/demonstrations/`。
 
 ~~~bash
-python3 scripts/hallway_patrol.py
+# 離線預訓練，不需要啟動 Gazebo
+python3 rl_pig_pen/train_bc.py
+
+# 停止手動控制、保持 Gazebo 運行，從 BC 模型接續 PPO
+python3 rl_pig_pen/train_ppo.py --resume rl_pig_pen/checkpoints_bc/ppo_corridor38_bc.zip \
+  --checkpoint-dir rl_pig_pen/checkpoints_from_bc --log-dir rl_pig_pen/logs_from_bc \
+  --timesteps 300000
 ~~~
+
+BC 只預訓練 actor，critic 由後續 PPO 學習。驗證誤差改善不代表完整巡邏已成功；
+需另外跑 `test_model.py --checkpoint-dir rl_pig_pen/checkpoints_from_bc` 評估。
+完整操作、資料篩選、搖桿與續訓方式見 [模仿學習指南](rl_pig_pen/IMITATION.md)。
 
 ---
 
@@ -331,16 +323,22 @@ ros2 run nav2_map_server map_saver_cli -f my_pigpen_map
 | 腳本 | 說明 |
 | :--- | :--- |
 | `launch_clean.sh` | 模擬環境主啟動腳本。支援 `--headless`（無頭模式）、`--env-id N`（平行訓練隔離）。 |
-| `launch_rl_training.sh` | 一鍵 RL 訓練腳本：自動啟動無頭模擬 → 校準路徑點 → TensorBoard → PPO 訓練。 |
+| `launch_rl_training.sh` | 一鍵 RL 訓練腳本：預設開啟 Gazebo 視窗 → TensorBoard → 38 維 PPO；`--mode patrol` 啟用整圖巡邏訓練。 |
 
 ### RL 訓練相關（`rl_pig_pen/`）
 
 | 腳本 | 說明 |
 | :--- | :--- |
-| `calibrate_waypoints.py` | 互動式路徑點校準工具。支援中途中斷續點（`waypoints_partial.json` 自動存檔）。 |
-| `pig_pen_env.py` | Gymnasium 環境：LiDAR 觀察、連續 cmd_vel 動作、Gazebo teleport reset、odom baseline 追蹤。支援 `env_id` 平行訓練。 |
-| `train_ppo.py` | PPO 訓練主程式：Stable-Baselines3 + TensorBoard + checkpoint。 |
-| `waypoints.json` | 校準後的巡邏路徑點座標（由 `calibrate_waypoints.py` 產生）。 |
+| `calibrate_waypoints.py` | 舊版路徑點校準工具，新版不使用。 |
+| `pig_pen_env.py` | 38 維 Gymnasium 環境；訓練片段與完整巡邏測試分開。 |
+| `navigation.py` | 感測特徵、獎勵、車體碰撞代理與速度安全檢查。 |
+| `patrol_controller.py` | 以相對運動與拓樸記憶完成六個端點來回的狀態機。 |
+| `patrol_config.json` | 出生姿態、路口數、偵測與控制參數。 |
+| `test_model.py` | 統計覆蓋率、返回完成率、碰撞率及全程成功率。 |
+| `train_ppo.py` | PPO 訓練主程式：Stable-Baselines3 + TensorBoard + checkpoint，可從 BC 模型續訓。 |
+| `record_demonstrations.py` | 記錄人工速度指令與 38 維雷達觀察，分段存檔。 |
+| `train_bc.py` | 離線行為複製預訓練，輸出相容 PPO 的模型。 |
+| `waypoints.json` | 保留的舊版座標，新版不讀取。 |
 
 ### 轉接與工具腳本
 
@@ -497,11 +495,9 @@ ps aux | grep -E "static_transform|ros_gz|ign" | grep -v grep | wc -l
 **`launch_rl_training.sh` 等待 120 秒超時**
 1. 確認無殭屍程序（見上方清理步驟）。
 2. 查看 log：`tail -30 ~/Desktop/4wd/logs/launch_clean_rl.log`
-3. 確認 `launch_clean.sh` 有 `--headless` 旗標：`grep "launch_clean" ~/Desktop/4wd/scripts/launch_rl_training.sh`
+3. 預設開啟 Gazebo 視窗；在沒有桌面顯示的環境才加入 `--headless`。
 
-**`waypoints.json` 中有 `PLACEHOLDER` 卻跳過校準**
-* 原因：腳本用 `grep -q "PLACEHOLDER"` 檢查，檔案不存在時 grep 回傳失敗誤判為「已校準」。
-* 修復：刪除 `waypoints.json` → 重新執行腳本。
+新版 38 維訓練不使用 `waypoints.json`，不需執行路徑點校準。
 
 **`等待 /scan 或 /odom 超時`（訓練中途）**
 * 原因：Gazebo 在訓練過程中崩潰，`/scan` topic 中斷。
