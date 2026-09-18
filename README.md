@@ -194,40 +194,45 @@ ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -r cmd_vel:=/cmd
 
 ## 5. 強化學習與完整巡邏
 
-採用 **38 維感測 PPO ＋巡邏狀態機**。RL 負責一般走道前進、置中與避障；
-狀態機負責路口進出、穿越、掉頭，以及 3 個路口兩側共 6 個端點的巡邏記憶。
-不需要 `waypoints.json` 或互動式路徑點校準。`/odom` 仍用於實測速度、相對轉角和短程距離。
+完整路線採用 **49 維 LiDAR PPO ＋巡邏狀態機（v2）**。PPO 負責路口轉向以外的移動；
+FSM 記錄 3 個路口兩側共 6 條支線的順序，並接管路口 90° 轉向。
+觀察及 FSM 不讀 odom／IMU；Gazebo 訓練仍用 odom 做重設、安全速度與位移獎勵。
+不需要 `waypoints.json`。另保留 38 維走道片段實驗模式。
 
 | 項目 | 定義 |
 | :--- | :--- |
 | 觀察 `0:36` | 36 條均勻取樣 LiDAR，截斷至 10 m 並除以 10 |
 | 觀察 `36` | 左側 60°～120° 平均距離減右側 −120°～−60° 平均距離，除以 10，範圍 [-1,1] |
 | 觀察 `37` | 前方 ±30° 最小距離除以 10，範圍 [0,1] |
-| 動作 | 線速度 [0,1] m/s、角速度 [-2,2] rad/s |
-| 一般走道獎勵 | `2 × odom 實測前向速度 − abs(左右平均距離差，公尺) − 0.05` |
+| 巡邏觀察 `38:46` | 8 個 PPO 階段的 one-hot |
+| 巡邏觀察 `46:49` | 牆線角度誤差、可信度、倒車意圖 |
+| 動作 | 走道模式線速度 [0,1] m/s；巡邏模式線速度 [-1,1] m/s；角速度 [-2,2] rad/s |
+| 巡邏局部獎勵 | 沿 LiDAR 走道軸的實測進度加分；偏角、偏心及耗時扣分；低可信度不發進度分 |
 | 碰撞代理判定 | LiDAR 點侵入含輪子的矩形車體及裕量：獎勵精確為 −100、終止並停車 |
 
 新特徵與安全檢查使用完整掃描。前進獎勵不使用命令速度。
-到達開口即結束訓練片段，該步不扣置中分；狀態機動作不進入 PPO 訓練。
-支線末端使用「已走過最低距離＋兩側欄舍結束」辨識，前方障礙物不算完成。
+38 維模式到開口即結束片段；49 維模式訓練完整路線，FSM 接管幀不當作 PPO 動作。
+整圖巡邏偵測到新路口並進入中心流程時獎勵 `+5`，端點、返回與完成獎勵另計。
+牆線先分別擬合再配對，避免車身垂直時被誤判平行；路口與端牆也需方向／淨空檢查。
 只有所有端點都到達且返回、再抵達主幹道末端，才算整體成功。
 
 ### 訓練與試跑
 
 ~~~bash
-# 一鍵啟動模擬、TensorBoard 與走道 PPO 訓練
-bash scripts/launch_rl_training.sh
+# 一鍵啟動模擬、TensorBoard 與完整路線 PPO 訓練
+bash scripts/launch_rl_training.sh --mode patrol --timesteps 3000000
 
 # 或在已啟動 launch_clean.sh 的模擬中訓練
-python3 rl_pig_pen/train_ppo.py --timesteps 3000000
+python3 rl_pig_pen/train_ppo.py --mode patrol --timesteps 3000000
 
 # 訓練結束後，在已啟動的模擬中測試完整巡邏
 python3 rl_pig_pen/test_model.py --episodes 3
 ~~~
 
-預設只從 `rl_pig_pen/checkpoints_corridor38/` 自動選取最新新版模型續訓；
-舊的 39 維模型保留在原資料夾，不直接續訓。可用 `--resume PATH` 指定相容模型。
-TensorBoard 目錄為 `rl_pig_pen/logs_corridor38/`，每 20,000 步存一次模型。
+巡邏只從 `rl_pig_pen/checkpoints_patrol49_v2/` 自動選取新版模型續訓，
+TensorBoard 使用 `rl_pig_pen/logs_patrol49_v2/`，每 20,000 步存一次模型。
+此次特徵與獎勵語意已改，舊 38／49 維模型不能直接續訓；原模型保留不刪除。
+未指定 `--mode patrol` 時仍是 38 維走道實驗，目錄為 `checkpoints_corridor38/`、`logs_corridor38/`。
 維持 PPO `[256,256]` 網路、2048 rollout steps、512 batch size、CPU 執行。
 訓練模式預設目標 6 倍速、停用三個相機並使用單執行緒 MLP；物理步長與 LiDAR
 取樣率維持原設定。可用 `bash scripts/launch_rl_training.sh --rtf 6` 調整倍率，
@@ -240,24 +245,12 @@ TensorBoard 目錄為 `rl_pig_pen/logs_corridor38/`，每 20,000 步存一次模
 
 完整參數、限制與測試方式見 [RL 設計說明](rl_pig_pen/README.md)。
 
-### 最新模型存檔
+### 模型版本與驗收
 
-目前最新的整圖 PPO 實驗存檔為：
-
-```text
-rl_pig_pen/checkpoints_patrol38/ppo_corridor38_interrupted.zip
-```
-
-這是中斷時保存的 checkpoint，目標為 300,000 步，但尚未完成訓練與成功巡邏驗證；
-最近回合完成率為 `0/6`，主要結束原因是 `stuck`。載入測試：
-
-```bash
-python3 rl_pig_pen/test_model.py \
-  --model rl_pig_pen/checkpoints_patrol38/ppo_corridor38_interrupted.zip \
-  --episodes 3
-```
-
-模型檔已納入 GitHub repository；訓練日誌與示範資料仍由 `.gitignore` 排除。
+v2 存檔名稱為 `ppo_patrol49_v2_*.zip`，並檢查存檔中的版本標記；舊模型不會因同為 49 維就被接受。
+已啟動的訓練程序不會自動更新程式，請先在原終端 Ctrl-C，再重新啟動。
+目前的自動測試包含角度掃描、實際欄杆靜態射線與理想策略的完整路線狀態檢查，
+不代表 PPO 已完成 Gazebo 全程巡邏。既有路口置中／轉向仍按幀數計時，詳見 RL 設計說明的限制。
 
 ---
 
@@ -318,6 +311,7 @@ ros2 run nav2_map_server map_saver_cli -f my_pigpen_map
 
 ## 8. 常用工具與轉接腳本 (`scripts/`)
 
+| `fsm_patrol.py` | 傳統幾何比例控制器（FSM）：基於 LiDAR 前瞻置中與走道平行誤差直接巡航，免除 RL 探索抽搐與 90 度卡死問題。 |
 ### 啟動腳本
 
 | 腳本 | 說明 |
@@ -339,7 +333,22 @@ ros2 run nav2_map_server map_saver_cli -f my_pigpen_map
 | `record_demonstrations.py` | 記錄人工速度指令與 38 維雷達觀察，分段存檔。 |
 | `train_bc.py` | 離線行為複製預訓練，輸出相容 PPO 的模型。 |
 | `waypoints.json` | 保留的舊版座標，新版不讀取。 |
+### 傳統 FSM 走道直線巡航控制 (`fsm_patrol.py`)
 
+若不使用 PPO 強化學習，可直接啟動傳統幾何比例控制節點進行平穩走道直行：
+
+```bash
+# 在已啟動 Gazebo 模擬環境下執行
+python3 rl_pig_pen/fsm_patrol.py
+```
+控制原理：
+
+前瞻左右扇區：取左前方（35°～65°）與右前方（-65°～-35°）雷達最小距離作為置中基準，具備前瞻預警效果。
+
+雙閉迴路比例控制：
+wz = K_heading * wall_parallel_error + K_center * (forward_left - forward_right)
+
+安全防護：角速度硬限制為 ±0.3 rad/s；正前方障礙距離小於 0.55m 時自動煞停。
 ### 轉接與工具腳本
 
 | 腳本 | 說明 |
@@ -511,3 +520,17 @@ ps aux | grep -E "static_transform|ros_gz|ign" | grep -v grep | wc -l
 **`can't subtract times with different time sources`**
 * 原因：`rclcpp::Time` 建構時未指定 clock source，與 `this->now()` 不相容。
 * 修復：`turn_on_robot` 建構子開頭加入 `_Now = this->now(); _Last_Time = this->now();`（已修正）。
+
+
+```text
+**RL 小車在窄道頻繁轉向 90 度面壁或原地抽搐**
+* 原因 1（幽靈速度刷分）：獎勵函式若獎勵指令速度 `commanded_vx` 而非真實位移 `progress_m`，神經網路會選擇頂著牆壁空踩油門刷分。
+* 原因 2（90 度假平衡盲區）：在 1.2m 窄走道中，車身垂直 90 度時左右雷達打入走道兩端深處，左右距離差值接近 0m，導致神經網路誤判為「完美置中」。
+* 修復方式：
+  1. 將前進獎勵嚴格綁定為 `progress_m` 實測位移。
+  2. 走道模式角速度上限收緊至 ±0.25 rad/s，或直接使用 `fsm_patrol.py` 傳統控制取代。
+
+**`SensorFault: Timed out waiting for fresh synchronized /scan and /odom`（秒死迴圈）**
+* 原因：RL 環境設定的嚴重偏角死刑（如歪斜 > 57° 立即結束回合）在小車剛出生時立即觸發，導致 1 秒內連續呼叫 `reset()` 4 次以上，Gazebo 與 ROS 2 橋接器承受不住連續瞬間傳送而造成感測器斷流。
+* 修復：在 `pig_pen_env.py` 的死刑條件加入出生保護期（`self._steps > 15`），提供約 1 秒的起步拉直緩衝，避免瞬間連續重置引發逾時。
+```

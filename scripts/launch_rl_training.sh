@@ -57,6 +57,20 @@ if [[ ! "$NUM_ENVS" =~ ^[1-8]$ || ! "$DOMAIN_BASE" =~ ^[0-9]+$ ]] || (( DOMAIN_B
     echo "Use --num-envs 1..8 and ROS domains in 0..100" >&2
     exit 1
 fi
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+for ((arg_index=0; arg_index<${#TRAIN_ARGS[@]}; arg_index++)); do
+    case "${TRAIN_ARGS[$arg_index]}" in
+        --config|--checkpoint-dir|--log-dir|--resume)
+            if (( arg_index + 1 < ${#TRAIN_ARGS[@]} )); then
+                path_value="${TRAIN_ARGS[$((arg_index + 1))]}"
+                if [[ "$path_value" != /* && ( -e "$PROJECT_ROOT/$path_value" || "$path_value" == rl_pig_pen/* ) ]]; then
+                    TRAIN_ARGS[$((arg_index + 1))]="$PROJECT_ROOT/$path_value"
+                fi
+                ((arg_index++))
+            fi
+            ;;
+    esac
+done
 if [[ ! "$PARTITION_PREFIX" =~ ^[a-zA-Z0-9_-]+$ ]]; then
     echo "Invalid --partition-prefix" >&2
     exit 1
@@ -66,7 +80,7 @@ if [[ "$TRAIN_MODE" != corridor && "$TRAIN_MODE" != patrol ]]; then
     exit 1
 fi
 if [[ "$TB_LOG_EXPLICIT" == false && "$TRAIN_MODE" == patrol ]]; then
-    TB_LOG_DIR="$RL_DIR/logs_patrol38"
+    TB_LOG_DIR="$RL_DIR/logs_patrol49_v2"
 fi
 if [[ "$TB_LOG_DIR" != /* ]]; then TB_LOG_DIR="$RL_DIR/$TB_LOG_DIR"; fi
 # Validate before launching processes or installing the cleanup trap.
@@ -188,8 +202,10 @@ for (( env_index=0; env_index<NUM_ENVS; env_index++ )); do
             error "環境 $env_index 異常終止，請查看 logs/launch_env_${env_index}.log 或 launch_clean_rl.log"
             exit 1
         fi
-        if ROS_DOMAIN_ID="$domain" timeout 4 ros2 topic echo /scan sensor_msgs/msg/LaserScan --once >/dev/null 2>&1 && \
-           ROS_DOMAIN_ID="$domain" timeout 4 ros2 topic echo /odom nav_msgs/msg/Odometry --once >/dev/null 2>&1; then
+        # Avoid ROS 2 daemon discovery here: it can be stale or unavailable
+        # while Gazebo is already publishing valid sensor messages.
+        if ROS_DOMAIN_ID="$domain" timeout 4 ros2 topic echo /scan sensor_msgs/msg/LaserScan --once --no-daemon >/dev/null 2>&1 && \
+           ROS_DOMAIN_ID="$domain" timeout 4 ros2 topic echo /odom nav_msgs/msg/Odometry --once --no-daemon >/dev/null 2>&1; then
             break
         fi
         if (( SECONDS >= deadline )); then

@@ -6,10 +6,11 @@ Discounting is per policy decision, not per simulated second.
 """
 
 from navigation import collision_detected, scan_features
-from pig_pen_env import PigPenEnv, _pose, _stamp
+from pig_pen_env import PigPenEnv, _stamp
 
 
 class PatrolTrainingEnv(PigPenEnv):
+    JUNCTION_REWARD = 5.0
     ENDPOINT_REWARD = 10.0
     RETURN_REWARD = 20.0
     COMPLETE_REWARD = 100.0
@@ -35,11 +36,16 @@ class PatrolTrainingEnv(PigPenEnv):
             if collision_detected(features, self.cfg):
                 result = PigPenEnv._step(self, [0.0, 0.0], snapshot=(scan, odom), arbitrate=False)
                 return (*result, frames)
-            command = self.controller.command(features, _pose(odom), _stamp(scan))
+            command = self.controller.command(features, _stamp(scan))
             info = self.controller.info()
             self._report(info)
+            if self.controller.state in ("DONE", "FAILED"):
+                self._ros.publish_cmd(0.0, 0.0)
+                self._episode_done = True
+                info.update(collision=False)
+                return self._policy_observation(features), 0.0, True, False, info, frames
             if command is None:
-                self._last_obs = features.observation
+                self._last_obs = self._policy_observation(features)
                 return self._last_obs.copy(), 0.0, False, False, info, frames
             previous_steps = self._steps
             result = PigPenEnv._step(self, command, snapshot=(scan, odom), arbitrate=False)
@@ -80,6 +86,7 @@ class PatrolTrainingEnv(PigPenEnv):
             info.update(next_info)
         # Credits route outcomes to the preceding policy decision. Automatic
         # forward motion/turning never supplies the corridor velocity reward.
+        reward += self.JUNCTION_REWARD * (info["junction"] - before["junction"])
         reward += self.ENDPOINT_REWARD * (info["endpoints_reached"] - before["endpoints_reached"])
         reward += self.RETURN_REWARD * (info["branches_done"] - before["branches_done"])
         if info.get("collision"):

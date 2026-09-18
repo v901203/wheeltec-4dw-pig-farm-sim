@@ -9,7 +9,7 @@ from stable_baselines3 import PPO
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from model_utils import validate_model
+from model_utils import PATROL_POLICY_VERSION, validate_model, validate_patrol_version
 from policy_config import PPO_PARAMS, policy_spaces
 from train_bc import OfflineSpaces, fit_actor
 
@@ -31,6 +31,24 @@ class SyntheticRollout(gym.Env):
 
 
 class BehaviorCloningTests(unittest.TestCase):
+    def test_patrol_schema_survives_sb3_checkpoint_roundtrip(self):
+        torch.set_num_threads(1)
+        env = OfflineSpaces()
+        env.observation_space, env.action_space = policy_spaces(allow_reverse=True, patrol=True)
+        model = PPO("MlpPolicy", env, device="cpu", n_steps=16, batch_size=8, verbose=0)
+        model.navigation_version = PATROL_POLICY_VERSION
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "patrol_v2.zip"
+            model.save(path)
+            loaded = PPO.load(path, device="cpu")
+            validate_patrol_version(loaded)
+            validate_model(loaded, env.observation_space, env.action_space)
+
+    def test_patrol_action_space_allows_reverse(self):
+        _, action_space = policy_spaces(allow_reverse=True)
+        self.assertEqual(action_space.low[0], -1.0)
+        self.assertTrue(action_space.contains(np.array([-0.2, 0.0], dtype=np.float32)))
+
     def test_fit_generalizes_and_checkpoint_can_continue_ppo(self):
         torch.set_num_threads(1)
         rng = np.random.default_rng(2)

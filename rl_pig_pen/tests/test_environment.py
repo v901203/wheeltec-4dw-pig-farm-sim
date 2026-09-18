@@ -84,11 +84,11 @@ class EnvironmentTests(unittest.TestCase):
         self.assertGreater(main_count, 0)
         self.assertGreater(branch_count, 0)
 
-    def test_train_never_executes_fsm_and_rewards_real_speed(self):
+    def test_train_never_executes_fsm_and_charges_elapsed_time(self):
         self.env.controller.command = Mock(side_effect=AssertionError("FSM used in training"))
         self.env._wait_sensor.side_effect = [snapshot(1), snapshot(1.1, speed=0)]
         obs, reward, terminated, truncated, info = self.env.step([0.4, 0])
-        self.assertAlmostEqual(reward, -0.05)
+        self.assertAlmostEqual(reward, -0.06)
         self.assertFalse(terminated or truncated)
         self.assertEqual(info["controller"], "rl")
         self.assertTrue(self.env.observation_space.contains(obs))
@@ -98,7 +98,7 @@ class EnvironmentTests(unittest.TestCase):
         values = np.full(361, 10.0)
         self.env._wait_sensor.side_effect = [snapshot(1), snapshot(1.1, speed=0.2, ranges=values)]
         _, reward, terminated, truncated, info = self.env.step([0.2, 0])
-        self.assertAlmostEqual(reward, 0.35)
+        self.assertAlmostEqual(reward, -0.06)
         self.assertFalse(terminated)
         self.assertTrue(truncated)
         self.assertTrue(info["segment_complete"])

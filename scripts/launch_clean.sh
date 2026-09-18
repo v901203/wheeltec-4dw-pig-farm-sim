@@ -150,7 +150,7 @@ sleep 1
 if [[ -f "$URDF" && -x "$DIR/spawn_robot.sh" ]]; then
     echo "Spawning robot..."
     start_background spawn.log bash "$DIR/spawn_robot.sh" --file "$URDF" --model "$MODEL" \
-        --pos 0 -14 0.05 --yaw 1.5708
+        --pos 0 -11.3 0.05 --yaw 1.5708
 fi
 
 if [[ "$HEADLESS" == "false" && "$LIDAR_ONLY" == "false" ]] && [[ -f "$DIR/aruco_face_detector.py" ]]; then

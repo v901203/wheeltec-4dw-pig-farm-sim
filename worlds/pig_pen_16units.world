@@ -4583,6 +4583,61 @@
       <pose>2.275 7.275 0.27 0 0 3.1416</pose>
     </include>
 
+
+    <!-- ===== 走道末端封牆（主幹道2處 + 3條支線各2處 = 8面） ===== -->
+    <model name="corridor_end_walls">
+      <static>true</static>
+      <pose>0 0 0 0 0 0</pose>
+      <!-- 主幹道北端封牆 -->
+      <link name="main_end_north">
+        <pose>0.000 11.790 0.600 0 0 0</pose>
+        <collision name="collision"><geometry><box><size>1.25 0.10 1.20</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>1.25 0.10 1.20</size></box></geometry><material><ambient>0.62 0.60 0.56 1</ambient><diffuse>0.72 0.70 0.66 1</diffuse><specular>0.05 0.05 0.05 1</specular></material></visual>
+      </link>
+      <!-- 主幹道南端封牆 -->
+      <link name="main_end_south">
+        <pose>0.000 -11.790 0.600 0 0 0</pose>
+        <collision name="collision"><geometry><box><size>1.25 0.10 1.20</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>1.25 0.10 1.20</size></box></geometry><material><ambient>0.62 0.60 0.56 1</ambient><diffuse>0.72 0.70 0.66 1</diffuse><specular>0.05 0.05 0.05 1</specular></material></visual>
+      </link>
+      <!-- 支線1 (y=-6.18) 西端封牆 -->
+      <link name="branch1_end_west">
+        <pose>-3.875 -6.180 0.600 0 0 0</pose>
+        <collision name="collision"><geometry><box><size>0.10 1.04 1.20</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>0.10 1.04 1.20</size></box></geometry><material><ambient>0.62 0.60 0.56 1</ambient><diffuse>0.72 0.70 0.66 1</diffuse><specular>0.05 0.05 0.05 1</specular></material></visual>
+      </link>
+      <!-- 支線1 (y=-6.18) 東端封牆 -->
+      <link name="branch1_end_east">
+        <pose>3.875 -6.180 0.600 0 0 0</pose>
+        <collision name="collision"><geometry><box><size>0.10 1.04 1.20</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>0.10 1.04 1.20</size></box></geometry><material><ambient>0.62 0.60 0.56 1</ambient><diffuse>0.72 0.70 0.66 1</diffuse><specular>0.05 0.05 0.05 1</specular></material></visual>
+      </link>
+      <!-- 支線2 (y=0.0) 西端封牆 -->
+      <link name="branch2_end_west">
+        <pose>-3.875 0.000 0.600 0 0 0</pose>
+        <collision name="collision"><geometry><box><size>0.10 1.04 1.20</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>0.10 1.04 1.20</size></box></geometry><material><ambient>0.62 0.60 0.56 1</ambient><diffuse>0.72 0.70 0.66 1</diffuse><specular>0.05 0.05 0.05 1</specular></material></visual>
+      </link>
+      <!-- 支線2 (y=0.0) 東端封牆 -->
+      <link name="branch2_end_east">
+        <pose>3.875 0.000 0.600 0 0 0</pose>
+        <collision name="collision"><geometry><box><size>0.10 1.04 1.20</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>0.10 1.04 1.20</size></box></geometry><material><ambient>0.62 0.60 0.56 1</ambient><diffuse>0.72 0.70 0.66 1</diffuse><specular>0.05 0.05 0.05 1</specular></material></visual>
+      </link>
+      <!-- 支線3 (y=6.18) 西端封牆 -->
+      <link name="branch3_end_west">
+        <pose>-3.875 6.180 0.600 0 0 0</pose>
+        <collision name="collision"><geometry><box><size>0.10 1.04 1.20</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>0.10 1.04 1.20</size></box></geometry><material><ambient>0.62 0.60 0.56 1</ambient><diffuse>0.72 0.70 0.66 1</diffuse><specular>0.05 0.05 0.05 1</specular></material></visual>
+      </link>
+      <!-- 支線3 (y=6.18) 東端封牆 -->
+      <link name="branch3_end_east">
+        <pose>3.875 6.180 0.600 0 0 0</pose>
+        <collision name="collision"><geometry><box><size>0.10 1.04 1.20</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>0.10 1.04 1.20</size></box></geometry><material><ambient>0.62 0.60 0.56 1</ambient><diffuse>0.72 0.70 0.66 1</diffuse><specular>0.05 0.05 0.05 1</specular></material></visual>
+      </link>
+    </model>
+
     <physics name="1ms" type="ignored">
     <max_step_size>0.001</max_step_size>
     <real_time_factor>3</real_time_factor>

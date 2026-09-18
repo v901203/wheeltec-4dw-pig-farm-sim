@@ -12,7 +12,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from navigation import (Config, SensorFault, collision_detected, load_config,
                         local_reward, safe_command, scan_features, wrap_angle)
 from patrol_controller import PatrolController
-from model_utils import latest_checkpoint, validate_model
+from model_utils import (PATROL_MODEL_NAME, PATROL_POLICY_VERSION, latest_checkpoint,
+                         validate_model, validate_patrol_version)
 
 
 def scan(ranges, start=-math.pi, increment=math.pi / 180):
@@ -48,7 +49,7 @@ class PerceptionTests(unittest.TestCase):
         self.assertLess(b.balance_m, 0)
         self.assertAlmostEqual(local_reward(0.3, a.balance_m), local_reward(0.3, b.balance_m))
         self.assertLess(local_reward(0.3, a.balance_m), local_reward(0.3, 0))
-        self.assertEqual(local_reward(0, 0), -0.05)
+        self.assertAlmostEqual(local_reward(0, 0), -0.05)
         self.assertEqual(local_reward(1, 0, collision=True), -100)
 
     def test_full_resolution_front_obstacle_between_samples(self):
@@ -61,6 +62,15 @@ class PerceptionTests(unittest.TestCase):
         command, stopped = safe_command([1, 0], f, self.cfg)
         self.assertTrue(stopped)
         np.testing.assert_array_equal(command, [0, 0])
+
+    def test_end_wall_requires_front_wall_and_side_walls(self):
+        raw = corridor_scan(0.65, 0.65).ranges.copy()
+        raw[165:196] = 0.6
+        end = scan_features(scan(raw), self.cfg)
+        self.assertTrue(end.end_wall_present(self.cfg))
+        raw[80:101] = 2.0
+        open_side = scan_features(scan(raw), self.cfg)
+        self.assertFalse(open_side.end_wall_present(self.cfg))
 
     def test_angles_use_metadata_not_array_indices(self):
         original = corridor_scan(0.8, 0.4)
@@ -80,15 +90,18 @@ class PerceptionTests(unittest.TestCase):
     def test_footprint_and_turn_clearance(self):
         self.assertFalse(collision_detected(scan_features(corridor_scan(0.45, 0.45), self.cfg), self.cfg))
         raw = np.full(361, 10.0)
-        raw[180] = 0.24
+        raw[180] = 0.30
         f = scan_features(scan(raw), self.cfg)
-        self.assertTrue(collision_detected(f, self.cfg))
+        self.assertFalse(collision_detected(f, self.cfg))
         _, stopped = safe_command([0, 0.5], f, self.cfg)
         self.assertTrue(stopped)
+        _, stopped = safe_command([0, 0.5], f, self.cfg, check_turn_clearance=False)
+        self.assertFalse(stopped)
 
-    def test_speed_reward_uses_supplied_measured_speed(self):
-        self.assertAlmostEqual(local_reward(0.2, 0.1), 0.25)
+    def test_progress_reward_uses_measured_displacement(self):
+        self.assertAlmostEqual(local_reward(0.2, 0.1), 1.05)
         self.assertLess(local_reward(-0.2, 0), local_reward(0, 0))
+        self.assertAlmostEqual(local_reward(0.2, 0, actual_dt=1.0), 0.6)
 
     def test_sparse_rail_returns_are_not_an_opening(self):
         raw = np.full(361, 2.0)
@@ -114,11 +127,10 @@ class PatrolTests(unittest.TestCase):
         self.assertEqual(self.fsm.junction, 0)
         self.assertEqual(self.fsm.state, "APPROACH")
 
-    def test_stuck_and_missing_junction_are_failure(self):
-        self.fsm.command(self.wall, (0, 0, 0), 11)
-        self.assertEqual(self.fsm.failure, "stuck")
+    def test_missing_junction_times_out_without_odometry(self):
+        self.fsm.command(self.wall, (0, 0, 0), 91)
+        self.assertEqual(self.fsm.failure, "state_timeout")
         self.assertFalse(self.fsm.info()["success"])
-        self.assertEqual(self.fsm.info()["no_motion_sim_seconds"], 11)
         self.assertEqual(self.fsm.info()["failed_state"], "APPROACH")
 
     def test_policy_in_place_rotation_is_motion_but_has_state_timeout(self):
@@ -130,11 +142,11 @@ class PatrolTests(unittest.TestCase):
         self.assertEqual(self.fsm.failure, "state_timeout")
         self.assertEqual(self.fsm.info()["state_sim_seconds"], 91)
 
-    def test_small_jitter_does_not_hide_physical_immobility(self):
+    def test_lidar_only_controller_does_not_infer_stuck_from_pose(self):
         self.fsm.state = "MAIN"
         for stamp in range(1, 12):
             self.fsm.command(self.wall, (0.01*(stamp % 2), 0, 0.02*(stamp % 2)), stamp)
-        self.assertEqual(self.fsm.failure, "stuck")
+        self.assertIsNone(self.fsm.failure)
 
     def test_translation_alone_is_still_valid_motion(self):
         self.fsm.state = "MAIN"
@@ -169,11 +181,18 @@ class PatrolTests(unittest.TestCase):
                 x, y, *_ = map(float, model.findtext("pose").split())
                 sx, sy, _ = map(float, model.findtext("./link[@name='floor']/collision/geometry/box/size").split())
                 boxes.append([x-sx/2, y-sy/2, x+sx/2, y+sy/2])
+            elif model.get("name") == "corridor_end_walls":
+                for link in model.findall("link"):
+                    x, y, *_ = map(float, link.findtext("pose").split())
+                    sx, sy, _ = map(float, link.findtext("./collision/geometry/box/size").split())
+                    boxes.append([x-sx/2, y-sy/2, x+sx/2, y+sy/2])
         boxes = np.array(boxes)
         angles = np.linspace(-math.pi, math.pi, 361)
         pose = np.array(self.cfg.start, dtype=float)
         self.fsm.reset(tuple(pose), 0)
         states = set()
+        transitions = []
+        previous_state = self.fsm.state
         for step in range(12000):
             directions = np.column_stack((np.cos(angles+pose[2]), np.sin(angles+pose[2])))
             with np.errstate(divide="ignore", invalid="ignore"):
@@ -188,22 +207,42 @@ class PatrolTests(unittest.TestCase):
             self.assertFalse(collision_detected(f, self.cfg), (step, pose, self.fsm.state))
             command = self.fsm.command(f, tuple(pose), step*self.cfg.control_dt)
             states.add(self.fsm.state)
+            if self.fsm.state != previous_state:
+                transitions.append((step, previous_state, self.fsm.state, tuple(pose)))
+                previous_state = self.fsm.state
             if self.fsm.state in ("DONE", "FAILED"):
                 break
             if command is None:
-                # Deterministic corridor follower isolates FSM behavior from learning.
-                command = [0.2, np.clip(2*wrap_angle(self.fsm.heading-pose[2]), -0.6, 0.6)]
-            command, _ = safe_command(command, f, self.cfg)
+                # Perfect-policy oracle used only to validate LiDAR FSM route
+                # transitions; production PPO receives no world heading.
+                branch_states = {"ENTRY", "OUTBOUND", "RETURN", "RETURN_CENTER"}
+                target = math.pi if self.fsm.state in branch_states else math.pi / 2.0
+                command = [-0.2 if self.fsm.expect_reverse() else 0.2,
+                           np.clip(2*wrap_angle(target-pose[2]), -0.6, 0.6)]
+            command, _ = safe_command(command, f, self.cfg, allow_reverse=True)
             v, w = command
             pose[0] += v*math.cos(pose[2])*self.cfg.control_dt
             pose[1] += v*math.sin(pose[2])*self.cfg.control_dt
             pose[2] = wrap_angle(pose[2]+w*self.cfg.control_dt)
-        self.assertEqual(self.fsm.state, "DONE", (step, pose, self.fsm.info(), self.fsm.distance, states))
+        self.assertEqual(self.fsm.state, "DONE", (step, pose, self.fsm.info(), states, transitions,
+                                                     f.wall_parallel_error, f.wall_alignment_confidence,
+                                                     f.front_wall_m, f.left_edge_m, f.right_edge_m))
         self.assertEqual(self.fsm.returned, {(j, s) for j in range(1, 4) for s in (0, 1)})
         self.assertEqual(self.fsm.info()["return_rate"], 1)
 
 
 class ModelTests(unittest.TestCase):
+    def test_old_49d_models_are_not_auto_selected_or_accepted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "ppo_patrol49_final.zip").touch()
+            self.assertIsNone(latest_checkpoint(directory, prefix=PATROL_MODEL_NAME))
+            new = Path(directory, PATROL_MODEL_NAME + "_final.zip")
+            new.touch()
+            self.assertEqual(latest_checkpoint(directory, prefix=PATROL_MODEL_NAME), new)
+        with self.assertRaisesRegex(ValueError, "patrol49_v2"):
+            validate_patrol_version(NS())
+        validate_patrol_version(NS(navigation_version=PATROL_POLICY_VERSION))
+
     def test_old_checkpoints_are_not_selected(self):
         with tempfile.TemporaryDirectory() as directory:
             Path(directory, "ppo_pig_pen_final.zip").touch()
@@ -215,7 +254,7 @@ class ModelTests(unittest.TestCase):
     def test_incompatible_shape_rejected(self):
         import gymnasium as gym
         old = NS(observation_space=gym.spaces.Box(0, 1, (39,), dtype=np.float32))
-        with self.assertRaisesRegex(ValueError, "38-D"):
+        with self.assertRaisesRegex(ValueError, "does not match"):
             validate_model(old, gym.spaces.Box(0, 1, (38,), dtype=np.float32), None)
 
     def test_default_configuration_loads(self):

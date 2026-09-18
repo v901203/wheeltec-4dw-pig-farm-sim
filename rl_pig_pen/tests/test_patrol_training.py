@@ -40,6 +40,11 @@ class PatrolTrainingTests(unittest.TestCase):
                 x, y, *_ = map(float, model.findtext("pose").split())
                 sx, sy, _ = map(float, model.findtext("./link[@name='floor']/collision/geometry/box/size").split())
                 self.boxes.append([x-sx/2, y-sy/2, x+sx/2, y+sy/2])
+            elif model.get("name") == "corridor_end_walls":
+                for link in model.findall("link"):
+                    x, y, *_ = map(float, link.findtext("pose").split())
+                    sx, sy, _ = map(float, link.findtext("./collision/geometry/box/size").split())
+                    self.boxes.append([x-sx/2, y-sy/2, x+sx/2, y+sy/2])
         self.boxes = np.array(self.boxes)
         self.env._ros.publish_cmd.side_effect = self.publish
         self.env._wait_sensor = self.sensor
@@ -75,12 +80,17 @@ class PatrolTrainingTests(unittest.TestCase):
 
     def test_six_branches_and_returns_form_one_episode(self):
         obs, info = self.env.reset(seed=0)
-        self.assertGreater(info["fsm_steps"], 0)
-        self.assertEqual(info["state"], "MAIN")
+        self.assertEqual(info["fsm_steps"], 0)
+        self.assertEqual(info["state"], "APPROACH")
         fsm_frames, previous_done, previous_reached = 0, 0, 0
         for step in range(12000):
-            # Ideal local follower isolates episode semantics from learning.
-            action = np.array([0.2, np.clip(2*wrap_angle(self.env.controller.heading-self.pose[2]), -0.6, 0.6)])
+            # Perfect-policy oracle validates route semantics only; the PPO
+            # observation itself contains LiDAR context and no world heading.
+            direction = -1.0 if self.env.controller.expect_reverse() else 1.0
+            branch_states = {"ENTRY", "OUTBOUND", "RETURN", "RETURN_CENTER"}
+            target = math.pi if self.env.controller.state in branch_states else math.pi / 2.0
+            action = np.array([direction * 0.2,
+                               np.clip(2*wrap_angle(target-self.pose[2]), -0.6, 0.6)])
             self.env._ros.publish_cmd.reset_mock()
             obs, reward, terminated, truncated, info = self.env.step(action)
             # The first published command must really be this PPO decision.
@@ -122,15 +132,48 @@ class PatrolTrainingTests(unittest.TestCase):
         self.assertEqual(info["failure_reason"], "collision")
         np.testing.assert_array_equal(self.command, [0, 0])
 
-    def test_stuck_ends_full_route_without_false_completion(self):
+    def test_sideways_motion_is_penalized_without_junction_credit(self):
         self.env.reset()
-        for _ in range(140):
+        self.pose = np.array([0.0, -8.5, 0.0])  # main corridor runs along world +Y
+        self.env.controller.state = "MAIN"
+        self.env._latest_snapshot = self.sensor()
+        for _ in range(4):
+            _, reward, terminated, truncated, info = self.env.step([0.2, 0.0])
+            self.assertFalse(terminated or truncated)
+            self.assertEqual(info["state"], "MAIN")
+            self.assertEqual(info["junction"], 0)
+            self.assertEqual(info["fsm_steps"], 0)
+            self.assertAlmostEqual(info["progress_m"], 0.0, places=5)
+            self.assertLess(info["reward_alignment"], -0.09)
+            self.assertLess(reward, -0.14)
+
+    def test_aligned_main_motion_earns_progress_but_wrong_way_return_does_not(self):
+        self.env.reset()
+        self.pose = np.array([0.0, -8.5, math.pi/2])
+        self.env.controller.state = "MAIN"
+        self.env._latest_snapshot = self.sensor()
+        _, reward, terminated, truncated, info = self.env.step([0.2, 0.0])
+        self.assertFalse(terminated or truncated)
+        self.assertGreater(info["reward_progress"], 0)
+        self.assertGreater(reward, 0)
+        self.env.controller.state = "RETURN"
+        self.env.controller.return_reverse = True
+        _, reward, _, _, info = self.env.step([0.2, 0.0])
+        self.assertLess(info["reward_progress"], 0)
+        self.assertLess(reward, 0)
+        _, reward, _, _, info = self.env.step([-0.2, 0.0])
+        self.assertGreater(info["reward_progress"], 0)
+        self.assertGreater(reward, 0)
+
+    def test_lidar_only_state_timeout_ends_route_without_false_completion(self):
+        self.env.reset()
+        for _ in range(1100):
             _, reward, terminated, truncated, info = self.env.step([0, 0])
             if terminated or truncated:
                 break
         self.assertTrue(terminated)
         self.assertFalse(info["success"])
-        self.assertEqual(info["failure_reason"], "stuck")
+        self.assertEqual(info["failure_reason"], "state_timeout")
         self.assertLess(reward, -20)
 
     def test_sensor_fault_stops_during_macro_transition(self):

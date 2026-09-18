@@ -71,7 +71,26 @@ class TrainingInputTests(unittest.TestCase):
                     train_ppo.main()
                 patrol.assert_called_once()
                 self.assertIn("return_rate", monitor.call_args.kwargs["info_keywords"])
-                ppo.return_value.save.assert_called_once_with(str(root / "checkpoints/ppo_corridor38_interrupted"))
+                ppo.return_value.save.assert_called_once_with(str(root / "checkpoints/ppo_patrol49_v2_interrupted"))
+                self.assertEqual(ppo.return_value.navigation_version, train_ppo.PATROL_POLICY_VERSION)
+                monitor.return_value.close.assert_called_once()
+
+    def test_old_patrol_resume_rejected_before_env_check_or_learning(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkpoint = root / "ppo_patrol49_final.zip"
+            checkpoint.touch()
+            argv = ["train_ppo.py", "--mode", "patrol", "--resume", str(checkpoint),
+                    "--checkpoint-dir", str(root / "out"), "--log-dir", str(root / "logs")]
+            with patch.object(sys, "argv", argv), patch.object(train_ppo, "PatrolTrainingEnv"), \
+                    patch.object(train_ppo, "Monitor") as monitor, patch.object(train_ppo, "PPO") as ppo, \
+                    patch.object(train_ppo, "validate_model"), patch.object(train_ppo, "check_env") as check:
+                ppo.load.return_value.navigation_version = None
+                with self.assertRaisesRegex(ValueError, "patrol49_v2"):
+                    train_ppo.main()
+                check.assert_not_called()
+                ppo.load.return_value.learn.assert_not_called()
+                ppo.load.return_value.save.assert_not_called()
                 monitor.return_value.close.assert_called_once()
 
 

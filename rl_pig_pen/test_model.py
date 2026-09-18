@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Evaluate the 38-D policy plus patrol FSM in an already-running Gazebo world."""
+"""Evaluate the 49-D v2 policy plus patrol FSM in an already-running Gazebo world."""
 
 import argparse
 from pathlib import Path
@@ -7,9 +7,10 @@ from pathlib import Path
 import numpy as np
 from stable_baselines3 import PPO
 
-from model_utils import CHECKPOINT_DIR, latest_checkpoint, validate_model
+from model_utils import (PATROL_CHECKPOINT_DIR, PATROL_MODEL_NAME, latest_checkpoint,
+                         validate_model, validate_patrol_version)
 from navigation import CONFIG_FILE
-from pig_pen_env import PigPenEnv
+from patrol_training_env import PatrolTrainingEnv
 
 
 def run_episode(model, env, episode_num):
@@ -39,17 +40,18 @@ def run_episode(model, env, episode_num):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", type=Path)
-    parser.add_argument("--checkpoint-dir", type=Path, default=CHECKPOINT_DIR)
+    parser.add_argument("--checkpoint-dir", type=Path, default=PATROL_CHECKPOINT_DIR)
     parser.add_argument("--config", type=Path, default=CONFIG_FILE)
     parser.add_argument("--episodes", type=int, default=3)
     args = parser.parse_args()
     if args.episodes <= 0:
         parser.error("--episodes must be positive")
-    path = args.model or latest_checkpoint(args.checkpoint_dir)
+    path = args.model or latest_checkpoint(args.checkpoint_dir, prefix=PATROL_MODEL_NAME)
     if path is None:
-        parser.error(f"No 38-D checkpoint in {args.checkpoint_dir}; run train_ppo.py first")
+        parser.error(f"No patrol49_v2 checkpoint in {args.checkpoint_dir}; run train_ppo.py --mode patrol first")
     model = PPO.load(str(path), device="cpu")
-    env = PigPenEnv(mode="patrol", config_file=args.config)
+    validate_patrol_version(model)
+    env = PatrolTrainingEnv(config_file=args.config)
     try:
         validate_model(model, env.observation_space, env.action_space)
         results = [run_episode(model, env, episode) for episode in range(1, args.episodes + 1)]

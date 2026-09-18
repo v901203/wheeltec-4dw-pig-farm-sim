@@ -1,4 +1,4 @@
-"""38-D LiDAR environment: corridor PPO training or hybrid patrol evaluation.
+"""38-D corridor / 49-D full-route LiDAR environment for Gazebo.
 
 Corridor training uses only PPO actions. PatrolTrainingEnv groups deterministic
 FSM maneuvers between PPO decisions for full-route training.
@@ -21,9 +21,9 @@ from rclpy.signals import SignalHandlerOptions
 from sensor_msgs.msg import LaserScan
 
 from navigation import (CONFIG_FILE, MAX_ANG, MAX_LIN, N_LIDAR, SensorFault,
-                        collision_detected, load_config, local_reward,
-                        safe_command, scan_features, wrap_angle)
-from patrol_controller import PatrolController
+                        collision_detected, corridor_progress, load_config, local_reward, patrol_reward,
+                        safe_command, scan_features, travelled_distance, wrap_angle)
+from patrol_controller import POLICY_STATES, PatrolController
 from policy_config import policy_spaces
 
 
@@ -96,10 +96,10 @@ class PigPenEnv(gym.Env):
         if mode not in ("train", "patrol"):
             raise ValueError("mode must be 'train' or 'patrol'")
         self.mode, self.cfg = mode, load_config(config_file)
-        self.observation_space, self.action_space = policy_spaces()
+        self.observation_space, self.action_space = policy_spaces(allow_reverse=mode == "patrol",
+                                                                   patrol=mode == "patrol")
         self._owns_ros = not rclpy.ok()
         if self._owns_ros:
-            # Let Python handle Ctrl-C so PPO can save before ROS is closed.
             rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
         self._ros = _RosNode()
         self._executor = SingleThreadedExecutor()
@@ -109,7 +109,14 @@ class PigPenEnv(gym.Env):
         self.controller = PatrolController(self.cfg)
         self._closed = False
         self._episode_done = True
-        self._last_obs = np.zeros(N_LIDAR + 2, dtype=np.float32)
+        self._last_obs = np.zeros(self.observation_space.shape, dtype=np.float32)
+
+    def _policy_observation(self, features):
+        if self.mode != "patrol":
+            return features.observation
+        if self.controller.state in POLICY_STATES:
+            return self.controller.observation(features)
+        return np.concatenate((features.observation, np.zeros(11, dtype=np.float32)))
 
     def _wait_sensor(self, min_stamp=None, timeout=None, min_received=None):
         timeout = self.cfg.sensor_timeout if timeout is None else timeout
@@ -131,11 +138,6 @@ class PigPenEnv(gym.Env):
         raise SensorFault("Timed out waiting for fresh synchronized /scan and /odom")
 
     def _training_spawn(self):
-        """Reset locations only; never navigation targets or observation inputs.
-
-        These corridor interiors match pig_pen_16units.world. A different world
-        requires new reset sampling and topology/threshold configuration.
-        """
         if self.cfg.world_name != "pig_pen_16units_world":
             raise ValueError("Training reset sampler currently supports pig_pen_16units_world only")
         if self.np_random.random() < 0.5:
@@ -143,8 +145,6 @@ class PigPenEnv(gym.Env):
             yaw = float(self.np_random.choice([-math.pi / 2, math.pi / 2]))
         else:
             x = float(self.np_random.choice([-2.5, 2.5]))
-            # Cross aisles lie BETWEEN pen rows; main-aisle y samples would
-            # place this lateral x inside a pen, even if LiDAR sees two walls.
             y = float(self.np_random.choice([-6.18, 0.0, 6.18]))
             yaw = float(self.np_random.choice([0.0, math.pi]))
         lateral = self.np_random.uniform(-0.08, 0.08)
@@ -161,8 +161,6 @@ class PigPenEnv(gym.Env):
             spawn = self._training_spawn() if self.mode == "train" else self.cfg.start
             self._ros.publish_cmd(0.0, 0.0)
             _teleport(self.cfg, spawn)
-            # The service accepts the pose asynchronously. Start settling from
-            # messages received AFTER its reply, never from the pre-reset cache.
             current, _ = self._wait_sensor(min_received=time.monotonic(), timeout=8.0)
             scan, odom = self._wait_sensor(min_stamp=_stamp(current) + 0.5, timeout=8.0)
             confirmed = 0
@@ -189,8 +187,6 @@ class PigPenEnv(gym.Env):
             self._ros.get_logger().warning(
                 f"[重生重試] 起點檢查失敗 {attempt}/{attempts}，座標 {spawn}: {diagnostic}")
         else:
-            # Do not accept a collision, open-space reset or broken sensor as a
-            # training corridor. Exhausted retries remain a diagnostic failure.
             self._ros.publish_cmd(0.0, 0.0)
             raise RuntimeError(
                 f"Unable to validate {self.mode} reset after {attempts} attempt(s); "
@@ -200,7 +196,7 @@ class PigPenEnv(gym.Env):
         self._steps = 0
         self._last_stamp = stamp
         self._motion_pose, self._motion_stamp = pose, stamp
-        self._last_obs = features.observation
+        self._last_obs = self._policy_observation(features)
         self._latest_snapshot = (scan, odom)
         self._episode_done = False
         return self._last_obs.copy(), {"mode": self.mode, "reset_attempts": attempt,
@@ -226,69 +222,130 @@ class PigPenEnv(gym.Env):
         self._latest_snapshot = (scan, odom)
         features = scan_features(scan, self.cfg)
         info = {"success": False, "mode": self.mode}
+        
         if collision_detected(features, self.cfg):
             self._ros.publish_cmd(0.0, 0.0)
             self._episode_done = True
             if self.mode == "patrol":
                 info.update(self.controller.info())
             info.update(collision=True, success=False, failure_reason="collision")
-            return features.observation, -100.0, True, False, info
+            return self._policy_observation(features), -100.0, True, False, info
 
+        start_pose = _pose(odom)
+        start_features = features
         command = action
         owner = "rl"
+        expected_reverse = False
+        
         if self.mode == "patrol":
-            override = self.controller.command(features, _pose(odom), _stamp(scan)) if arbitrate else None
+            expected_reverse = self.controller.expect_reverse()
+            override = self.controller.command(features, _stamp(scan)) if arbitrate else None
             if override is not None:
                 command, owner = override, "fsm"
             info.update(self.controller.info())
             if self.controller.state in ("DONE", "FAILED"):
                 self._ros.publish_cmd(0.0, 0.0)
                 self._episode_done = True
-                return features.observation, 0.0, True, False, info
+                return self._policy_observation(features), 0.0, True, False, info
 
-        command, blocked = safe_command(command, features, self.cfg, odom.twist.twist.linear.x)
+        # === 解除訓練模式的虛擬防撞煞停 ===
+        if self.mode == "train":
+            lower_vx = 0.0  # 走道訓練禁止倒車
+            cmd_vx = float(np.clip(command[0], lower_vx, MAX_LIN))
+            cmd_wz = float(np.clip(command[1], -MAX_ANG, MAX_ANG))
+            command = np.array([cmd_vx, cmd_wz])
+            blocked = False
+        else:
+            command, blocked = safe_command(command, features, self.cfg, odom.twist.twist.linear.x,
+                                            allow_reverse=self.mode == "patrol")
+
         self._ros.publish_cmd(*command)
-        # One fresh LiDAR frame per nominal 1/12 simulated second. No RTF guess.
         scan, odom = self._wait_sensor(min_stamp=_stamp(scan) + self.cfg.control_dt)
         self._latest_snapshot = (scan, odom)
-        # Stop while PPO computes/updates; it may take many simulated seconds.
         self._ros.publish_cmd(0.0, 0.0)
+        
         features = scan_features(scan, self.cfg)
         pose, stamp = _pose(odom), _stamp(scan)
         self._steps += 1
+        
         collision = collision_detected(features, self.cfg)
         corridor = max(features.left_edge_m, features.right_edge_m) <= self.cfg.open_distance
-        reward = local_reward(odom.twist.twist.linear.x, features.balance_m, collision, corridor)
-        terminated, truncated = collision, False
+        actual_dt = max(0.0, stamp - self._last_stamp)
+
+        if self.mode == "patrol":
+            progress_m = corridor_progress(start_pose, pose, start_features,
+                                           reverse=expected_reverse, actual_dt=actual_dt)
+        else:
+            if start_features.wall_alignment_confidence >= 0.5:
+                progress_m = corridor_progress(start_pose, pose, start_features, actual_dt=actual_dt)
+            else:
+                progress_m = travelled_distance(start_pose, pose, 1.0, actual_dt)
+
+        cmd_vx = float(command[0])
+        cmd_wz = float(command[1])
+
+        # === ☢️ 嚴重歪斜直接判死刑 ===
+        # 只要演算法確信在走道內，且車身歪斜超過 1.0 rad (約 57度)
+        severe_misalignment = (features.wall_alignment_confidence >= 0.5 and 
+                               abs(features.wall_parallel_error) > 1.0)
+        
+        # 將「撞牆」或「嚴重歪斜」都視為致命失敗，觸發 -100 分並立刻結束回合
+        fatal_failure = collision or severe_misalignment
+
+        if self.mode == "patrol":
+            reward, terms = patrol_reward(0.0 if owner == "fsm" else progress_m, features,
+                                          collision=fatal_failure, actual_dt=actual_dt,
+                                          commanded_vx=cmd_vx, commanded_wz=cmd_wz)
+            info.update(terms)
+        else:
+            reward = local_reward(0.0 if owner == "fsm" else progress_m, features.balance_m,
+                                  collision=fatal_failure, corridor=corridor, actual_dt=actual_dt,
+                                  commanded_vx=cmd_vx, commanded_wz=cmd_wz,
+                                  wall_parallel_error=features.wall_parallel_error)
+
+        terminated, truncated = fatal_failure, False
         info.update(controller=owner, safety_stop=blocked, collision=collision,
+                    severe_misalignment=severe_misalignment,
                     balance_m=features.balance_m, front_clearance_m=features.front_m,
-                    actual_dt=stamp - self._last_stamp)
-        if collision:
-            info.update(success=False, failure_reason="collision")
+                    wall_parallel_error=features.wall_parallel_error,
+                    wall_alignment_confidence=features.wall_alignment_confidence,
+                    wall_balance_m=features.wall_balance_m,
+                    actual_dt=actual_dt, progress_m=progress_m,
+                    commanded_vx=cmd_vx, commanded_wz=cmd_wz)
+
+        if fatal_failure:
+            info.update(success=False, failure_reason="collision" if collision else "severe_misalignment")
+
         if self.mode == "train":
-            # End the PPO segment BEFORE an FSM-controlled maneuver is needed.
-            if not corridor and not collision:
+            # 修補轉向 90 度提早通關的漏洞
+            aligned_with_corridor = abs(features.wall_parallel_error) <= math.radians(20)
+            if not corridor and not collision and aligned_with_corridor:
                 truncated = True
                 info["segment_complete"] = True
+
             moved = math.hypot(pose[0] - self._motion_pose[0], pose[1] - self._motion_pose[1])
             turned = abs(wrap_angle(pose[2] - self._motion_pose[2]))
             if moved > 0.05 or turned > 0.08:
                 self._motion_pose, self._motion_stamp = pose, stamp
-            if stamp - self._motion_stamp > self.cfg.stuck_seconds and not collision:
+            # 原地定桿太久直接中斷並扣分
+            if stamp - self._motion_stamp > self.cfg.stuck_seconds and not fatal_failure:
                 truncated = True
                 info["failure_reason"] = "stuck"
+                reward -= 20.0
                 info.update(motion_distance_m=moved, motion_angle_rad=turned,
                             no_motion_sim_seconds=stamp-self._motion_stamp)
+
         limit = self.cfg.train_max_steps if self.mode == "train" else self.cfg.patrol_max_steps
         if self._steps >= limit and not terminated:
             truncated = True
             info["failure_reason"] = "time_limit"
-        self._last_stamp, self._last_obs = stamp, features.observation
+
+        self._last_stamp, self._last_obs = stamp, self._policy_observation(features)
         self._episode_done = terminated or truncated
         hook = getattr(self, "progress_hook", None)
         if hook is not None:
             hook()
-        return features.observation.copy(), reward, terminated, truncated, info
+        return self._last_obs.copy(), reward, terminated, truncated, info
 
     def close(self):
         if self._closed:

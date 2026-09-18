@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train a 38-D policy on corridor segments or complete hybrid patrols."""
+"""Train a corridor policy or the 49-D LiDAR-only full-route policy."""
 
 import argparse
 from pathlib import Path
@@ -15,7 +15,9 @@ from training_monitor import TrainingMonitor as Monitor
 from navigation import CONFIG_FILE
 from pig_pen_env import PigPenEnv
 from patrol_training_env import PatrolTrainingEnv
-from model_utils import CHECKPOINT_DIR, LOG_DIR, latest_checkpoint, resolve_checkpoint, validate_model
+from model_utils import (CHECKPOINT_DIR, LOG_DIR, PATROL_CHECKPOINT_DIR, PATROL_LOG_DIR,
+                         PATROL_MODEL_NAME, PATROL_POLICY_VERSION, latest_checkpoint,
+                         resolve_checkpoint, validate_model, validate_patrol_version)
 from policy_config import PPO_PARAMS
 from parallel_training import WorkerFactory, TrainingVecEnv, ParallelProgress
 
@@ -29,9 +31,9 @@ def main():
     parser.add_argument("--config", type=Path, default=CONFIG_FILE)
     parser.add_argument("--mode", choices=("corridor", "patrol"), default="corridor",
                         help="patrol trains across all six branches; FSM maneuvers run between PPO decisions")
-    parser.add_argument("--checkpoint-dir", type=Path, help="Default: checkpoints_corridor38 or checkpoints_patrol38")
-    parser.add_argument("--log-dir", type=Path, help="Default: logs_corridor38 or logs_patrol38")
-    parser.add_argument("--resume", type=Path, help="Specific compatible 38-D model; default: latest v2 checkpoint")
+    parser.add_argument("--checkpoint-dir", type=Path, help="Default: checkpoints_corridor38 or checkpoints_patrol49_v2")
+    parser.add_argument("--log-dir", type=Path, help="Default: logs_corridor38 or logs_patrol49_v2")
+    parser.add_argument("--resume", type=Path, help="Specific compatible model; patrol requires a patrol49_v2 checkpoint")
     parser.add_argument("--torch-threads", type=int, default=1, help="CPU threads for the small MLP (default: 1)")
     parser.add_argument("--num-envs", type=int, default=1, help="Number of isolated Gazebo workers sharing this PPO (1..8)")
     parser.add_argument("--domain-base", type=int, default=40)
@@ -45,9 +47,11 @@ def main():
         parser.error("Use 1..8 environments and ROS domains in 0..100")
     if not re.fullmatch(r"[a-zA-Z0-9_-]+", args.partition_prefix):
         parser.error("Invalid partition prefix")
-    args.checkpoint_dir = args.checkpoint_dir or (CHECKPOINT_DIR if args.mode == "corridor" else CHECKPOINT_DIR.with_name("checkpoints_patrol38"))
-    args.log_dir = args.log_dir or (LOG_DIR if args.mode == "corridor" else LOG_DIR.with_name("logs_patrol38"))
-    resume = args.resume or latest_checkpoint(args.checkpoint_dir)
+    args.checkpoint_dir = args.checkpoint_dir or (CHECKPOINT_DIR if args.mode == "corridor" else PATROL_CHECKPOINT_DIR)
+    args.log_dir = args.log_dir or (LOG_DIR if args.mode == "corridor" else PATROL_LOG_DIR)
+    model_name = "ppo_corridor38" if args.mode == "corridor" else PATROL_MODEL_NAME
+    model_label = "38-D corridor" if args.mode == "corridor" else "49-D LiDAR-only full-route"
+    resume = args.resume or latest_checkpoint(args.checkpoint_dir, prefix=model_name)
     if resume is not None:
         try:
             resume = resolve_checkpoint(resume)
@@ -75,13 +79,18 @@ def main():
     model = None
     try:
         if resume:
-            print(f"Resume 38-D policy: {resume}")
-            model = PPO.load(str(resume), env=env, device="cpu", tensorboard_log=str(args.log_dir), n_steps=rollout_steps)
+            print(f"Resume {model_label} policy: {resume}")
+            model = PPO.load(str(resume), env=env, device="cpu", tensorboard_log=str(args.log_dir),
+                             n_steps=rollout_steps)
             validate_model(model, env.observation_space, env.action_space)
+            if args.mode == "patrol":
+                validate_patrol_version(model)
         else:
-            print("Start a new 38-D policy from scratch.")
+            print(f"Start a new {model_label} policy from scratch.")
             model = PPO("MlpPolicy", env, device="cpu", tensorboard_log=str(args.log_dir),
                         **dict(PPO_PARAMS, n_steps=rollout_steps))
+            if args.mode == "patrol":
+                model.navigation_version = PATROL_POLICY_VERSION
         if args.num_envs == 1:
             check_env(env, warn=True)
             env.start_training(model.num_timesteps, args.timesteps)
@@ -89,7 +98,7 @@ def main():
             env.env_method("start_training", 0,
                            (args.timesteps + args.num_envs-1) // args.num_envs)
         callback = CheckpointCallback(save_freq=max(1, CHECKPOINT_FREQ // args.num_envs), save_path=str(args.checkpoint_dir),
-                                      name_prefix="ppo_corridor38", verbose=1)
+                                      name_prefix=model_name, verbose=1)
         if args.num_envs > 1:
             callback = [callback, ParallelProgress(model.num_timesteps, args.timesteps)]
         try:
@@ -98,11 +107,11 @@ def main():
         except KeyboardInterrupt:
             print("Training interrupted; saving the current policy.")
         except Exception:
-            emergency = args.checkpoint_dir / "ppo_corridor38_interrupted"
+            emergency = args.checkpoint_dir / f"{model_name}_interrupted"
             model.save(str(emergency))
             print(f"Training failed; saved the current policy to {emergency}.zip", flush=True)
             raise
-        model.save(str(args.checkpoint_dir / "ppo_corridor38_final"))
+        model.save(str(args.checkpoint_dir / f"{model_name}_final"))
     finally:
         env.close()
 
