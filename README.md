@@ -1,536 +1,200 @@
-# Wheeltec 4WD 豬舍 ROS 2 / Gazebo 模擬專案
+# Wheeltec 4WD 豬舍模擬與 LiDAR 控制
 
-本專案基於 **ROS 2 Humble** 與 **Gazebo Ignition Fortress 6**，專為四輪驅動 (4WD) 巡檢機器人在豬舍環境中的感測器融合、深度學習（強化學習 RL / 行為複製 BC）、SLAM 建圖與自主導航所設計。支援 Gazebo 模擬環境與實體 Wheeltec STM32 底盤雙軌運行。
+本專案提供 ROS 2 Humble／Gazebo Ignition Fortress 豬舍模擬場景、四輪差速機器人模型，以及 LiDAR 傳統走道控制程式。
 
----
+目前可使用 `scripts/launch_clean.sh` 開啟 Gazebo，再獨立執行 `rl_pig_pen/fsm_patrol.py` 進行走道直行。控制器僅讀取 `/scan` 並發布 `/cmd_vel`，不依賴底盤 odom／IMU，也不需要載入模型。
 
-## 目錄
+新增獨立入口 `rl_pig_pen/fsm_lidar_patrol.py`，以傳統控制完成左支線前進到底、倒退穿過路口至右端、前進回中心、轉回主幹道並繼續下一個路口的循環，直到主幹道終點。原本直行腳本維持不變。
 
-1. [網格與場景規格](#1-網格與場景規格-pig-pen-world)
-2. [機器人硬體與感測器配置](#2-機器人硬體與感測器配置)
-3. [環境安裝與建置](#3-環境安裝與建置-prerequisites--build)
-4. [快速開始](#4-快速開始-quick-start)
-5. [強化學習訓練 (RL Pipeline)](#5-強化學習訓練-rl-pipeline)
-6. [行為複製 (Behavioral Cloning)](#6-行為複製-behavioral-cloning)
-7. [SLAM 建圖與自主導航](#7-slam-建圖與自主導航)
-8. [常用工具與轉接腳本](#8-常用工具與轉接腳本-scripts)
-9. [串口控制協議 (STM32 實體底盤)](#9-串口控制協議-stm32-實體底盤)
-10. [外部依賴與 Git 子模組](#10-外部依賴與-git-子模組-zed-description)
-11. [移植紀錄 (ROS1 → ROS2 / Fortress)](#11-移植紀錄-ros1--ros2--fortress)
-12. [常見問題與除錯](#12-常見問題與除錯-troubleshooting)
+完成設定的 3 個路口後，進入 `FINAL_MAIN`，只沿主幹道行駛並確認終點牆，不再接受第四個支線入口；確認終點後才停止並回報 `DONE`。
 
----
+## 目前功能範圍
 
-## 1. 網格與場景規格 (Pig Pen World)
+| 功能 | 狀態 |
+| --- | --- |
+| Gazebo 世界、車子生成、LiDAR 與 ROS 橋接 | 保留啟動流程 |
+| 相機、深度點雲、RViz 與豬隻行為 | 保留相關腳本，依啟動選項載入 |
+| LiDAR 走道平行修正、左右置中、前方過近停車 | 現有直行控制器 |
+| 完整支線巡邏、倒車、路口轉 90° | 新增獨立傳統控制入口，已通過靜態雷達／理想運動路線測試，待 Gazebo 物理驗證 |
+| 舊 PPO／BC 訓練與模型測試 | 程式已移除，不再提供可用入口 |
+| 傳統控制＋RL 混合架構 | 尚未實作 |
 
-目前預設使用的豬舍世界檔為 **`worlds/pig_pen_16units.world`**（可依需求替換為 `worlds/pig_pen_8units(lv4).world`），包含 **16 間單獨豬舍** 與 **16 隻帶有 ArUco 視覺標記的假豬模型**：
+`fsm_patrol.py` 的現有類別是 `PigPenStraightLineController`；檔名不代表它已能完成整條巡邏路線。更詳細的控制參數與限制請見 [LiDAR 控制說明](rl_pig_pen/README.md)。
 
-### 豬舍結構規格
-* **單間尺寸**：長 3.30m × 寬 2.55m 長方形。
-* **四面欄杆牆**：
-  * **長邊牆 (`left_wall` / `right_wall`)**：3.30m，各含 32 根圓柱欄杆。
-  * **短邊牆 (`front_wall` / `back_wall`)**：2.55m，各含 24 根圓柱欄杆。
-  * **欄杆規格**：總高 83cm、直徑 1.5cm、中心間距 10cm（淨空隙 8.5cm）。
-  * **高度校正**：下橫桿 0.035m、欄杆中心 0.415m、上橫桿 0.795m，完全貼合地面無懸空。
+## 快速開始
 
-### 長邊相鄰佈局 (Long-Side Adjacent)
-* **左排 (X = -2.4m)**：`pen1` ～ `pen8`，沿 Y 軸長邊相鄰排列（間距 4cm）。
-* **右排 (X = +2.4m)**：`pen9` ～ `pen16`，沿 Y 軸長邊相鄰排列（間距 4cm）。
-* **中央巡檢走道**：兩排之間預留 **1.5m 寬走道**（沿 Y 軸延伸，X 範圍約在 -0.75m ～ +0.75m）。
-* **走道支線（十字路口）**：豬欄排列形成 3 個十字形交叉路口，RL 巡邏路線需進入每條支線。
+以下以專案位置 `/home/an/Desktop/4wd` 為例。這些步驟啟動的是模擬環境，不會啟動實體底盤串口程式。
 
-### 豬隻與 ArUco 視覺標記
-* 每間豬舍配備 1 隻假豬模型 (`farm_pig`)，放置於飼料盆旁（偏移 0.7m 避開碰撞體）。
-* 豬隻前端帶有 **ArUco Marker 貼圖**，統一朝向中央走道：
-  * **左排 (`pig1` ～ `pig8`)**：ArUco 面朝向 +X 方向。
-  * **右排 (`pig9` ～ `pig16`)**：ArUco 面旋轉 180 度朝向 -X 方向。
+### 1. 啟動 Gazebo
 
----
-
-## 2. 機器人硬體與感測器配置
-
-底盤基於 **Wheeltec 4WD 差速車 (`wheeltec_mini`)**，URDF 檔位於 `turn_on_wheeltec_robot/urdf/four_wheel_diff_bs_robot.urdf`：
-
-* **底盤尺寸**：0.40m × 0.30m × 0.065m，離地高度 4.5cm，輪胎直徑 15cm（半徑 7.5cm）。
-* **預設出生點**：`X=0.0, Y=-14.0, Z=0.05`，朝向 Y 軸正方向（`yaw = 1.5708`），位於中央走道右端起點（面向巡邏方向）。
-* **感測器裝備**：
-  1. **2D LiDAR (M10P-PHY)**：Topic `/scan`，位於 Z 軸 0.245m 處，360° 掃描，最大量測距離 25m。
-  2. **前方深度相機 (ZED X)**：
-     * 深度圖 Topic：`/camera/depth/image_raw`
-     * 彩色圖 Topic：`/camera/color/image_raw`
-  3. **右側監視相機 (Right Camera)**：
-     * 彩色圖 Topic：`/camera_right/image_raw`（朝右側拍攝豬欄）
-
-> **注意（RTX 5090）**：Ubuntu 22.04 內建的 Mesa 不支援 Blackwell 架構 GPU（PCI ID `0x7d67`），導致 Gazebo GPU LiDAR 全部輸出 `inf`。`launch_clean.sh` 已自動設定 `__EGL_VENDOR_LIBRARY_FILENAMES` 強制使用 NVIDIA EGL 驅動，無需手動處理。
-
----
-
-## 3. 環境安裝與建置 (Prerequisites & Build)
-
-### 系統需求
-* Ubuntu 22.04 LTS (Jammy)
-* ROS 2 Humble
-* Gazebo Ignition Fortress 6（`libignition-gazebo6`）
-* Python 3.10+
-* NVIDIA Driver 580+（RTX 5090 需 580.173.02 以上）
-
-### 依賴套件安裝
-
-~~~bash
-sudo apt update
-sudo apt install -y \
-  ros-humble-ros-gz-sim \
-  ros-humble-ros-gz \
-  ros-humble-xacro \
-  ros-humble-robot-state-publisher \
-  ros-humble-joint-state-publisher \
-  ros-humble-depth-image-proc \
-  ros-humble-teleop-twist-keyboard \
-  libasio-dev
-~~~
-
-### RL 訓練 Python 套件
-
-~~~bash
-pip install gymnasium stable-baselines3[extra] tensorboard --break-system-packages
-~~~
-
-### 工作區編譯
-
-`turn_on_wheeltec_robot` 已從 ROS1（catkin）移植為 ROS2（ament_cmake），並新增 `transport_drivers`（serial_driver）作為序列埠函式庫：
-
-~~~bash
-cd ~/Desktop/4wd
-
-# 首次使用需 clone transport_drivers（ros-drivers/serial_driver 相依）
-mkdir -p src
-git clone https://github.com/ros-drivers/transport_drivers.git src/
-
-source /opt/ros/humble/setup.bash
-rosdep install --from-paths src turn_on_wheeltec_robot --ignore-src -r -y
-colcon build --symlink-install --packages-up-to turn_on_wheeltec_robot
-~~~
-
-### 環境自動載入（建議一次性設定）
-
-~~~bash
-echo "source /opt/ros/humble/setup.bash" >> ~/.bashrc
-echo "source ~/Desktop/4wd/install/setup.bash" >> ~/.bashrc
-~~~
-
----
-
-## 4. 快速開始 (Quick Start)
-
-### 一般模擬（含 GUI）
-
-啟動 Gazebo 豬舍場景、機器人 Spawn、ROS 2 Bridge 通訊、點雲處理節點與 RViz2：
-
-~~~bash
-cd ~/Desktop/4wd/scripts
-./launch_clean.sh
-~~~
-
-支援的選項：
-
-| 選項 | 說明 |
-| :--- | :--- |
-| `--headless` | 無頭模式：不開 Gazebo GUI 與 RViz，適合 RL 訓練 |
-| `--env-id N` | 平行訓練環境隔離，設定 `IGN_PARTITION=pig_pen_N` |
-| `./launch_clean.sh <world_file>` | 指定不同的 world 檔 |
-
-此腳本會自動啟動：
-* Gazebo world 豬舍場景（Ignition Fortress，`ign gazebo`）
-* 機器人 URDF 自動 Spawn（出生點 Y=-14，走道右端起點）
-* ROS 2 Bridge 通訊（`/scan`、`/odom`、`/cmd_vel`；有頭模式額外橋接相機 topics）
-* 深度點雲轉換節點與 QoS Relay（僅有頭模式）
-* 豬隻隨機行為控制節點（僅有頭模式）
-* RViz 預設配置（僅有頭模式）
-
-### 一鍵 RL 訓練（推薦）
-
-~~~bash
-cd ~/Desktop/4wd/scripts
-./launch_rl_training.sh --mode patrol --timesteps 300000
-~~~
-
-自動執行：開啟 Gazebo 視窗 → 等待環境就緒 → 啟動 TensorBoard → 開始整圖 PPO＋狀態機巡邏訓練。
-`--mode patrol` 在同一回合巡邏六條支線並返回；省略時使用走道片段訓練。
-動作支援原地左右旋轉，路口轉向與末端掉頭由狀態機執行。不需要校準路徑點。
-預設開窗，只有指定 `--headless` 才使用無視窗模式。詳細流程見 [整圖訓練說明](rl_pig_pen/README.md)。
-訓練也會另開終端機，每 15 秒顯示進度與數據，每回合列出中文重生原因與累計次數。
-按 Ctrl-C 可中止並存檔；輸出同步存到 `logs/rl_training_*.log`。
-加 `--same-terminal` 可使用原本的終端機。
-
-### 手動場景與車型控制
-
-~~~bash
-# 僅啟動 Gazebo + 機器人（不含感測器與 RViz）
-./scripts/launch_pig_pen.sh
-
-# 手動 Spawn 特定車型（旗艦版）
-./scripts/spawn_robot.sh --file turn_on_wheeltec_robot/urdf/flagship_four_wheel_diff_bs_robot.urdf \
-    --model flagship_four_wheel_diff_bs --pos 0 0 0.05 --yaw 1.5708
-~~~
-
-### 鍵盤遙控小車
-
-~~~bash
-source ~/.bashrc
-ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -r cmd_vel:=/cmd_vel
-~~~
-
-**鍵盤按鍵對應：**
-
-| 按鍵 | 動作 | 按鍵 | 動作 |
-| :---: | :--- | :---: | :--- |
-| `i` | 前進 | `k` | 強制停止 |
-| `,` | 後退 | `q` / `z` | 最大速度 ±10% |
-| `j` / `l` | 左轉 / 右轉 | `w` / `x` | 僅線速度 ±10% |
-| `u` / `o` | 左前 / 右前轉向 | `e` / `c` | 僅角速度 ±10% |
-| `m` / `.` | 左後 / 右後轉向 | | |
-
----
-
-## 5. 強化學習與完整巡邏
-
-完整路線採用 **49 維 LiDAR PPO ＋巡邏狀態機（v2）**。PPO 負責路口轉向以外的移動；
-FSM 記錄 3 個路口兩側共 6 條支線的順序，並接管路口 90° 轉向。
-觀察及 FSM 不讀 odom／IMU；Gazebo 訓練仍用 odom 做重設、安全速度與位移獎勵。
-不需要 `waypoints.json`。另保留 38 維走道片段實驗模式。
-
-| 項目 | 定義 |
-| :--- | :--- |
-| 觀察 `0:36` | 36 條均勻取樣 LiDAR，截斷至 10 m 並除以 10 |
-| 觀察 `36` | 左側 60°～120° 平均距離減右側 −120°～−60° 平均距離，除以 10，範圍 [-1,1] |
-| 觀察 `37` | 前方 ±30° 最小距離除以 10，範圍 [0,1] |
-| 巡邏觀察 `38:46` | 8 個 PPO 階段的 one-hot |
-| 巡邏觀察 `46:49` | 牆線角度誤差、可信度、倒車意圖 |
-| 動作 | 走道模式線速度 [0,1] m/s；巡邏模式線速度 [-1,1] m/s；角速度 [-2,2] rad/s |
-| 巡邏局部獎勵 | 沿 LiDAR 走道軸的實測進度加分；偏角、偏心及耗時扣分；低可信度不發進度分 |
-| 碰撞代理判定 | LiDAR 點侵入含輪子的矩形車體及裕量：獎勵精確為 −100、終止並停車 |
-
-新特徵與安全檢查使用完整掃描。前進獎勵不使用命令速度。
-38 維模式到開口即結束片段；49 維模式訓練完整路線，FSM 接管幀不當作 PPO 動作。
-整圖巡邏偵測到新路口並進入中心流程時獎勵 `+5`，端點、返回與完成獎勵另計。
-牆線先分別擬合再配對，避免車身垂直時被誤判平行；路口與端牆也需方向／淨空檢查。
-只有所有端點都到達且返回、再抵達主幹道末端，才算整體成功。
-
-### 訓練與試跑
-
-~~~bash
-# 一鍵啟動模擬、TensorBoard 與完整路線 PPO 訓練
-bash scripts/launch_rl_training.sh --mode patrol --timesteps 3000000
-
-# 或在已啟動 launch_clean.sh 的模擬中訓練
-python3 rl_pig_pen/train_ppo.py --mode patrol --timesteps 3000000
-
-# 訓練結束後，在已啟動的模擬中測試完整巡邏
-python3 rl_pig_pen/test_model.py --episodes 3
-~~~
-
-巡邏只從 `rl_pig_pen/checkpoints_patrol49_v2/` 自動選取新版模型續訓，
-TensorBoard 使用 `rl_pig_pen/logs_patrol49_v2/`，每 20,000 步存一次模型。
-此次特徵與獎勵語意已改，舊 38／49 維模型不能直接續訓；原模型保留不刪除。
-未指定 `--mode patrol` 時仍是 38 維走道實驗，目錄為 `checkpoints_corridor38/`、`logs_corridor38/`。
-維持 PPO `[256,256]` 網路、2048 rollout steps、512 batch size、CPU 執行。
-訓練模式預設目標 6 倍速、停用三個相機並使用單執行緒 MLP；物理步長與 LiDAR
-取樣率維持原設定。可用 `bash scripts/launch_rl_training.sh --rtf 6` 調整倍率，
-實際速度仍須以 PPO 的 `fps` 衡量。
-訓練和測試不可同時控制同一個模擬。
-
-感測步進依雷達時間戳，名義週期為 1/12 模擬秒，不使用固定三倍速假設。
-自由運行的 Gazebo 仍可能有排程延遲，`info["actual_dt"]` 提供實際間隔；
-每次取樣後送出停車命令，避免模型更新期間持續行駛。
-
-完整參數、限制與測試方式見 [RL 設計說明](rl_pig_pen/README.md)。
-
-### 模型版本與驗收
-
-v2 存檔名稱為 `ppo_patrol49_v2_*.zip`，並檢查存檔中的版本標記；舊模型不會因同為 49 維就被接受。
-已啟動的訓練程序不會自動更新程式，請先在原終端 Ctrl-C，再重新啟動。
-目前的自動測試包含角度掃描、實際欄杆靜態射線與理想策略的完整路線狀態檢查，
-不代表 PPO 已完成 Gazebo 全程巡邏。既有路口置中／轉向仍按幀數計時，詳見 RL 設計說明的限制。
-
----
-
-## 6. 手動示範與行為複製 (Behavioral Cloning)
-
-已支援「手動錄製 → 離線 BC 預訓練 → PPO 續訓」。使用同一套 38 維觀察與
-`[線速度, 角速度]` 動作，BC 模型可直接由現有 PPO 載入。
-
-先在原訓練終端按 Ctrl-C 並等待存檔、清理完成。從專案根目錄，在三個終端依序執行：
-
-~~~bash
-# 終端 1：手動示範用 1 倍目標速度，開啟 Gazebo 畫面
-bash scripts/launch_clean.sh --rtf 1
-
-# 終端 2：只讀取 /scan 與人工 /cmd_vel，不會自行控制車子
-python3 rl_pig_pen/record_demonstrations.py
-
-# 終端 3：鍵盤駕駛；持續按住 i/u/o 等移動鍵以持續送出指令
-ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -p speed:=0.2 -p turn:=0.5
-~~~
-
-示範走道內的直行、偏左／偏右後的修正與減速避障。`i` 向前，`u/o` 向前左／右轉，
-`k` 停車。倒車、原地轉向與路口開放區域不納入這個局部策略，路口選向仍由狀態機處理。
-錄完先停車、結束鍵盤，再於錄製終端按 Ctrl-C 儲存尾段。建議分成數段獨立示範，
-包含兩側偏移與不同走道；有效樣本數會顯示在終端。資料放在 `rl_pig_pen/demonstrations/`。
-
-~~~bash
-# 離線預訓練，不需要啟動 Gazebo
-python3 rl_pig_pen/train_bc.py
-
-# 停止手動控制、保持 Gazebo 運行，從 BC 模型接續 PPO
-python3 rl_pig_pen/train_ppo.py --resume rl_pig_pen/checkpoints_bc/ppo_corridor38_bc.zip \
-  --checkpoint-dir rl_pig_pen/checkpoints_from_bc --log-dir rl_pig_pen/logs_from_bc \
-  --timesteps 300000
-~~~
-
-BC 只預訓練 actor，critic 由後續 PPO 學習。驗證誤差改善不代表完整巡邏已成功；
-需另外跑 `test_model.py --checkpoint-dir rl_pig_pen/checkpoints_from_bc` 評估。
-完整操作、資料篩選、搖桿與續訓方式見 [模仿學習指南](rl_pig_pen/IMITATION.md)。
-
----
-
-## 7. SLAM 建圖與自主導航
-
-若要啟動 SLAM 建圖（需先安裝 `ros-humble-slam-toolbox`）：
-
-~~~bash
-ros2 launch slam_toolbox online_async_launch.py
-~~~
-
-儲存建好的地圖：
-
-~~~bash
-ros2 run nav2_map_server map_saver_cli -f my_pigpen_map
-~~~
-
----
-
-## 8. 常用工具與轉接腳本 (`scripts/`)
-
-| `fsm_patrol.py` | 傳統幾何比例控制器（FSM）：基於 LiDAR 前瞻置中與走道平行誤差直接巡航，免除 RL 探索抽搐與 90 度卡死問題。 |
-### 啟動腳本
-
-| 腳本 | 說明 |
-| :--- | :--- |
-| `launch_clean.sh` | 模擬環境主啟動腳本。支援 `--headless`（無頭模式）、`--env-id N`（平行訓練隔離）。 |
-| `launch_rl_training.sh` | 一鍵 RL 訓練腳本：預設開啟 Gazebo 視窗 → TensorBoard → 38 維 PPO；`--mode patrol` 啟用整圖巡邏訓練。 |
-
-### RL 訓練相關（`rl_pig_pen/`）
-
-| 腳本 | 說明 |
-| :--- | :--- |
-| `calibrate_waypoints.py` | 舊版路徑點校準工具，新版不使用。 |
-| `pig_pen_env.py` | 38 維 Gymnasium 環境；訓練片段與完整巡邏測試分開。 |
-| `navigation.py` | 感測特徵、獎勵、車體碰撞代理與速度安全檢查。 |
-| `patrol_controller.py` | 以相對運動與拓樸記憶完成六個端點來回的狀態機。 |
-| `patrol_config.json` | 出生姿態、路口數、偵測與控制參數。 |
-| `test_model.py` | 統計覆蓋率、返回完成率、碰撞率及全程成功率。 |
-| `train_ppo.py` | PPO 訓練主程式：Stable-Baselines3 + TensorBoard + checkpoint，可從 BC 模型續訓。 |
-| `record_demonstrations.py` | 記錄人工速度指令與 38 維雷達觀察，分段存檔。 |
-| `train_bc.py` | 離線行為複製預訓練，輸出相容 PPO 的模型。 |
-| `waypoints.json` | 保留的舊版座標，新版不讀取。 |
-### 傳統 FSM 走道直線巡航控制 (`fsm_patrol.py`)
-
-若不使用 PPO 強化學習，可直接啟動傳統幾何比例控制節點進行平穩走道直行：
+終端 1：
 
 ```bash
-# 在已啟動 Gazebo 模擬環境下執行
-python3 rl_pig_pen/fsm_patrol.py
+cd /home/an/Desktop/4wd
+bash scripts/launch_clean.sh
 ```
-控制原理：
 
-前瞻左右扇區：取左前方（35°～65°）與右前方（-65°～-35°）雷達最小距離作為置中基準，具備前瞻預警效果。
+預設開啟 Gazebo GUI，並啟動相機相關橋接與可用的 RViz／點雲節點；**不會自動啟動行車控制器**。
 
-雙閉迴路比例控制：
-wz = K_heading * wall_parallel_error + K_center * (forward_left - forward_right)
+只需要雷達時，可改用以下指令，仍會開啟 Gazebo 視窗：
 
-安全防護：角速度硬限制為 ±0.3 rad/s；正前方障礙距離小於 0.55m 時自動煞停。
-### 轉接與工具腳本
-
-| 腳本 | 說明 |
-| :--- | :--- |
-| `pointcloud_qos_relay.py` | 將 `BEST_EFFORT` 點雲轉換為 `RELIABLE` 的 `/camera/depth/points_reliable` 供 RViz 穩定顯示。 |
-| `republish_odom.py` | 將 `/model/wheeltec_mini/odometry` 轉發至標準 `/odom` Topic。 |
-| `cmdvel_to_wheels.py` | 依差速車運動學將 `/cmd_vel` 換算為左右輪角速度。 |
-| `cmdvel_to_stm32.py` | 將 `/cmd_vel` 轉為實體 STM32 串口 11-byte 通訊封包。 |
-| `control_cmdvel.py` | 快速發送單次或定時速度測試指令。 |
-
-~~~bash
-# 範例：前進 0.2 m/s 持續 3 秒
-python3 scripts/control_cmdvel.py --linear 0.2 --duration 3
-~~~
-
----
-
-## 9. 串口控制協議 (STM32 實體底盤)
-
-> **前提**：`turn_on_wheeltec_robot` 套件已從 ROS1（catkin）移植為 ROS2（ament_cmake）。詳見[移植紀錄](#11-移植紀錄-ros1--ros2--fortress)。
-
-* **串口規格**：115200 Baud, 8 Data Bits, 1 Stop Bit, No Parity (8N1)，硬體預設串口 3。
-* **udev symlink**：預設裝置路徑 `/dev/wheeltec_controller`；若不存在，使用 `--ros-args -p usart_port_name:=/dev/ttyUSB0` 覆寫。
-
-### 下行通訊封包結構 (11 Bytes)
-
-| Byte | 內容 | 說明 |
-| :---: | :--- | :--- |
-| [0] | `0x7B` | 幀頭 |
-| [1] | `0x00` | 預留 |
-| [2] | `0x00` | 預留 |
-| [3] | X MSB | X 軸線速度高位元組（mm/s，Big-Endian） |
-| [4] | X LSB | X 軸線速度低位元組 |
-| [5] | Y MSB | Y 軸線速度高位元組 |
-| [6] | Y LSB | Y 軸線速度低位元組 |
-| [7] | Z MSB | Z 軸角速度高位元組（rad/s × 1000） |
-| [8] | Z LSB | Z 軸角速度低位元組 |
-| [9] | Checksum | 前 9 Bytes XOR 校驗碼 |
-| [10] | `0x7D` | 幀尾 |
-
-### 上行資料（下位機 → ROS2）
-
-* 24-byte 封包，包含底盤 XYZ 速度、MPU6050 六軸 IMU 原始資料、電源電壓。
-* IMU 轉換比率：加速度計 `ACCEl_RATIO = 1671.84`（±2g / ±32768），陀螺儀 `GYROSCOPE_RATIO = 0.00026644`（±500°/s / ±32768）。
-* 四元數解算：Mahony 濾波器（`Quaternion_Solution.cpp`），取樣頻率 20Hz。
-
-### 啟動實體串口橋接
-
-~~~bash
-# 先 build 套件
-source ~/.bashrc
-colcon build --packages-select turn_on_wheeltec_robot
-
-# 啟動節點
-ros2 run turn_on_wheeltec_robot wheeltec_robot_node \
-    --ros-args -p usart_port_name:=/dev/wheeltec_controller \
-               -p serial_baud_rate:=115200
-~~~
-
----
-
-## 10. 外部依賴與 Git 子模組 (ZED Description)
-
-本專案使用官方 ZED 描述包作為機器人相機的 xacro/mesh 定義，放置於 `zed_description` 子模組。
-
-~~~bash
-# 剛 Clone 專案時更新子模組
-git submodule update --init --recursive
-
-# 或透過 apt 安裝備用描述包
-sudo apt install ros-humble-zed-description
-~~~
-
----
-
-## 11. 移植紀錄 (ROS1 → ROS2 / Fortress)
-
-### Gazebo Fortress 指令變更
-
-原本 ROS1 時期使用 `gz sim`，Fortress 需改用 `ign gazebo`：
-
-| 原指令（ROS1 / Garden+） | Fortress 對應指令 |
-| :--- | :--- |
-| `gz sim -s -r world.sdf` | `ign gazebo -s -r world.sdf` |
-| `gz sim -g` | `ign gazebo -g` |
-| `GZ_SIM_RESOURCE_PATH` | `IGN_GAZEBO_RESOURCE_PATH`（兩者皆設定以求相容） |
-
-### `turn_on_wheeltec_robot` ROS2 移植重點
-
-原始套件為 ROS1（catkin）架構，與 ROS2 Humble 不相容，已完成移植：
-
-* `CMakeLists.txt`：`catkin` → `ament_cmake`
-* `package.xml`：`<buildtool_depend>catkin</buildtool_depend>` → `ament_cmake`
-* C++ API：`ros::NodeHandle` → `rclcpp::Node` 繼承；`ros::Publisher` / `Subscriber` → `create_publisher` / `create_subscription`
-* TF：`tf::TransformBroadcaster` → `tf2_ros`
-* 訊息型別：`nav_msgs::Odometry` → `nav_msgs::msg::Odometry`（所有訊息加 `::msg::`）
-* 序列埠：`wjwwood/serial`（ROS1 生態，無 Humble apt 套件）→ `ros-drivers/transport_drivers` 中的 `serial_driver`
-
-### RTX 5090（Blackwell）相容性設定
-
-`launch_clean.sh` 已自動套用以下設定，無需手動處理：
-
-~~~bash
-# 強制 Gazebo 使用 NVIDIA EGL（避免 Mesa 不支援 PCI ID 0x7d67 導致 GPU LiDAR 全 inf）
-export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json
-
-# 抑制 Ignition Transport ZMQ 連線統計（減少多節點同時啟動時的崩潰機率）
-export IGN_TRANSPORT_TOPIC_STATISTICS=0
-~~~
-
----
-
-## 12. 常見問題與除錯 (Troubleshooting)
-
-### 模擬環境
-
-**按鍵盤車子不會動**
-* 確認 `/cmd_vel` bridge 方向符號為 `]`（ROS→GZ）：`/cmd_vel@geometry_msgs/msg/Twist]gz.msgs.Twist`
-* 確保鍵盤焦點在執行 `teleop_twist_keyboard` 的 Terminal 上。
-
-**LiDAR `/scan` 全部輸出 `inf`**
-* 原因：Mesa 不支援 RTX 5090（Blackwell）GPU，Gazebo 無法初始化 GPU LiDAR raycast。
-* 修復：確認 `launch_clean.sh` 中有 `export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json`。
-* 驗證：`ls /usr/share/glvnd/egl_vendor.d/` 應看到 `10_nvidia.json`。
-
-**RViz 畫面全黑 / 找不到 Displays 面板**
-* 點擊 RViz 左上角 **Panels → Displays** 開啟面板。
-* 確保 Topic 已正確選擇（`/camera/depth/points_reliable`、`/camera/color/image_raw` 等）。
-
-**小車行駛時過度打滑**
-* 在 `four_wheel_diff_bs_robot.urdf` 輪胎 `<gazebo>` 標籤中，將 `mu1` / `mu2` 調高至 20.0～50.0。
-* 在 DiffDrive 插件中限制最大加速度：`<max_linear_acceleration>1.5</max_linear_acceleration>`。
-
-**Gazebo server 崩潰（`libzmq abort`）**
-* 原因：多個 ROS2 節點同時建立 ZMQ 連線時 Ignition Transport 有已知不穩定問題。
-* 修復：確認 `IGN_TRANSPORT_TOPIC_STATISTICS=0` 已設定；重新執行前先清理殭屍程序（見下）。
-
-### 殭屍程序清理
-
-每次 `launch_clean.sh` 異常終止後需確認程序確實清除，否則下次啟動會衝突：
-
-~~~bash
-pkill -9 -f "static_transform_publisher" || true
-pkill -9 -f "ros_gz_bridge"              || true
-pkill -9 -f "ign gazebo"                 || true
-pkill -9 -f "robot_state_publisher"      || true
-# 確認歸零（輸出應為 0 或 1，那 1 個是系統 unattended-upgrades，不用管）
-ps aux | grep -E "static_transform|ros_gz|ign" | grep -v grep | wc -l
-~~~
-
-### RL 訓練
-
-**`launch_rl_training.sh` 等待 120 秒超時**
-1. 確認無殭屍程序（見上方清理步驟）。
-2. 查看 log：`tail -30 ~/Desktop/4wd/logs/launch_clean_rl.log`
-3. 預設開啟 Gazebo 視窗；在沒有桌面顯示的環境才加入 `--headless`。
-
-新版 38 維訓練不使用 `waypoints.json`，不需執行路徑點校準。
-
-**`等待 /scan 或 /odom 超時`（訓練中途）**
-* 原因：Gazebo 在訓練過程中崩潰，`/scan` topic 中斷。
-* 查看：`tail -20 ~/Desktop/4wd/logs/gz_sim_server.log`
-* 處理：Ctrl-C 停止訓練，清理程序後重新執行；上次 checkpoint 不會遺失，訓練會從最近一個 checkpoint 繼續。
-
-**`ValueError: generator already executing`**
-* 原因：多個環境物件共用同一個 rclpy executor。
-* 修復：`pig_pen_env.py` 應使用獨立的 `SingleThreadedExecutor`（已修正）。
-
-**`can't subtract times with different time sources`**
-* 原因：`rclcpp::Time` 建構時未指定 clock source，與 `this->now()` 不相容。
-* 修復：`turn_on_robot` 建構子開頭加入 `_Now = this->now(); _Last_Time = this->now();`（已修正）。
-
-
-```text
-**RL 小車在窄道頻繁轉向 90 度面壁或原地抽搐**
-* 原因 1（幽靈速度刷分）：獎勵函式若獎勵指令速度 `commanded_vx` 而非真實位移 `progress_m`，神經網路會選擇頂著牆壁空踩油門刷分。
-* 原因 2（90 度假平衡盲區）：在 1.2m 窄走道中，車身垂直 90 度時左右雷達打入走道兩端深處，左右距離差值接近 0m，導致神經網路誤判為「完美置中」。
-* 修復方式：
-  1. 將前進獎勵嚴格綁定為 `progress_m` 實測位移。
-  2. 走道模式角速度上限收緊至 ±0.25 rad/s，或直接使用 `fsm_patrol.py` 傳統控制取代。
-
-**`SensorFault: Timed out waiting for fresh synchronized /scan and /odom`（秒死迴圈）**
-* 原因：RL 環境設定的嚴重偏角死刑（如歪斜 > 57° 立即結束回合）在小車剛出生時立即觸發，導致 1 秒內連續呼叫 `reset()` 4 次以上，Gazebo 與 ROS 2 橋接器承受不住連續瞬間傳送而造成感測器斷流。
-* 修復：在 `pig_pen_env.py` 的死刑條件加入出生保護期（`self._steps > 15`），提供約 1 秒的起步拉直緩衝，避免瞬間連續重置引發逾時。
+```bash
+bash scripts/launch_clean.sh --lidar-only
 ```
+
+上述啟動方式擇一使用。其他選項：
+
+| 選項 | 說明 |
+| --- | --- |
+| `--lidar-only` | 建立停用相機的暫存場景／車型，略過相機、點雲及 RViz 啟動流程 |
+| `--headless` | 不開 Gazebo GUI，亦略過相機橋接及 RViz；不等同於移除車型中的相機 |
+| `--rtf 1` | 設定目標模擬速度倍率；實際速度受負載限制 |
+| `--env-id N` | 設定 ROS domain（0～100）及 Gazebo 通訊隔離 |
+| 世界檔路徑 | 替換預設 world，例如 `bash scripts/launch_clean.sh worlds/pig_pen_16units.world` |
+
+若使用 `--env-id N`，其他控制／診斷終端也必須設定 `export ROS_DOMAIN_ID=N`。
+
+### 2. 啟動 LiDAR 直行控制
+
+等模擬與雷達就緒後，在終端 2 執行：
+
+```bash
+cd /home/an/Desktop/4wd
+source /opt/ros/humble/setup.bash
+/usr/bin/python3 rl_pig_pen/fsm_patrol.py
+```
+
+收到第一筆掃描後，車子便會開始控制。預設巡航速度為 0.2 m/s，直行修正角速度上限為 ±0.3 rad/s；前方 ±30° 內的最短距離小於 0.55 m 時停車，障礙離開後會恢復前進。
+
+同一台車只應有一個行車控制器發布 `/cmd_vel`。不要同時執行 FSM、鍵盤遙控或速度測試。
+
+停止時先在控制器終端按 `Ctrl-C`，再停止 `launch_clean.sh`。啟動腳本會清理自己建立的模擬程序。
+
+### 3. 手動控制（取代 FSM）
+
+先停止直行控制器，再於已載入 ROS 環境的終端執行：
+
+```bash
+ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -p speed:=0.2 -p turn:=0.3
+```
+
+鍵盤焦點需放在該終端；`i` 前進、`,` 後退、`j/l` 左右轉、`k` 停車。
+
+### 4. 完整傳統巡邏（取代直行／手動控制）
+
+從預設主幹道起點測試，建議 Gazebo 使用 `--lidar-only --rtf 1` 啟動。先停止其他行車控制器，再在另一個終端執行：
+
+```bash
+cd /home/an/Desktop/4wd
+source /opt/ros/humble/setup.bash
+/usr/bin/python3 rl_pig_pen/fsm_lidar_patrol.py
+```
+
+控制器會顯示目前狀態、已完成路口及支線端點數。轉彎和路口置中使用 LiDAR 幾何完成判斷；感測中斷或追蹤異常會鎖定停車。詳細流程與測試範圍見 [完整巡邏說明](rl_pig_pen/README.md)。
+
+## 執行環境與建置
+
+現有啟動流程以 Ubuntu 22.04、ROS 2 Humble、Gazebo Ignition Fortress 6 為基礎。執行前應備妥：
+
+- `ign gazebo`、`ros_gz_sim`、`ros_gz_bridge`。
+- `robot_state_publisher`、`tf2_ros`，以及 Python 的 `rclpy`、NumPy、ROS 訊息套件。
+- 完整相機模式另需 RViz、`depth_image_proc`，以及視覺脚本使用的 OpenCV／ArUco 與 `cv_bridge`。
+- 手動控制另需 `teleop_twist_keyboard`。
+
+目前直行控制不需要 PyTorch、Gymnasium 或 Stable-Baselines3。若 Python 找不到 ROS 套件，先載入 `/opt/ros/humble/setup.bash`，並使用 `/usr/bin/python3`。
+
+需要建置本地 Wheeltec ROS 2 套件時，可在相依套件已備妥後執行：
+
+```bash
+cd /home/an/Desktop/4wd
+source /opt/ros/humble/setup.bash
+colcon build --symlink-install --packages-up-to turn_on_wheeltec_robot
+source install/setup.bash
+```
+
+`src/transport_drivers/` 已存在，不要再次 clone 覆蓋。建置底盤套件不代表需要在模擬時啟動實體串口節點。
+
+啟動腳本目前包含 NVIDIA EGL／GLX 環境設定；非 NVIDIA 主機或不同顯示環境需要另行確認相容性。此文件不代表已完成 Xavier 或實車驗證。
+
+## 場景、車型與通訊
+
+| 項目 | 目前設定 |
+| --- | --- |
+| 預設世界 | [worlds/pig_pen_16units.world](worlds/pig_pen_16units.world) |
+| 車型 | [four_wheel_diff_bs_robot.urdf](turn_on_wheeltec_robot/urdf/four_wheel_diff_bs_robot.urdf) |
+| Gazebo 模型名稱 | `wheeltec_mini` |
+| 出生位置 | `x=0, y=-11.3, z=0.05, yaw=1.5708`，由 `launch_clean.sh` 設定 |
+| 雷達 | `/scan`，`sensor_msgs/msg/LaserScan` |
+| 行車指令 | `/cmd_vel`，`geometry_msgs/msg/Twist` |
+| 模擬里程計 | 橋接至 `/odom`，但目前直行控制器不訂閱 |
+| 相機 | `/camera/depth/image_raw`、`/camera/color/image_raw`、`/camera_right/image_raw`，依啟動模式橋接 |
+
+世界與豬隻資源分別位於 `worlds/` 與 `pig_model/`。若專案搬到其他位置，啟動前可用 `PIG_MODEL_PKG_DIR` 指向實際的 `pig_model` 目錄；腳本的預設值是 `$HOME/Desktop/4wd/pig_model`。
+
+## 目錄與常用工具
+
+| 路徑 | 用途 |
+| --- | --- |
+| [scripts/launch_clean.sh](scripts/launch_clean.sh) | 模擬主入口 |
+| [scripts/spawn_robot.sh](scripts/spawn_robot.sh) | 生成機器人 |
+| [scripts/prepare_training_scene.py](scripts/prepare_training_scene.py) | 為 `--rtf`／`--lidar-only` 產生暫存世界與車型；仍是啟動流程的相依程式 |
+| [scripts/pig_behavior.py](scripts/pig_behavior.py) | 豬隻行為控制 |
+| [scripts/aruco_face_detector.py](scripts/aruco_face_detector.py) | ArUco 視覺辨識 |
+| [scripts/pointcloud_qos_relay.py](scripts/pointcloud_qos_relay.py) | 深度點雲 QoS 轉接 |
+| [scripts/control_cmdvel.py](scripts/control_cmdvel.py) | 手動指定速度與持續時間的測試工具，會讓車子移動 |
+| [scripts/cmdvel_to_stm32.py](scripts/cmdvel_to_stm32.py) | 實體底盤串口速度轉接，不由模擬入口啟動 |
+| [rl_pig_pen/](rl_pig_pen/README.md) | 獨立直行與巡邏控制、幾何估計、設定及測試 |
+| `turn_on_wheeltec_robot/` | ROS 2 底盤套件、URDF 與模型資源 |
+| `turn_on_wheeltec_robot_ros1_backup/` | ROS 1 備份，不是目前 ROS 2 執行入口 |
+| `src/transport_drivers/` | 傳輸／串口相依套件 |
+| [zed_description/](zed_description/README.md) | ZED 相機描述資源 |
+| `rviz/` | RViz 設定 |
+| `logs/` | 模擬啟動日誌 |
+| `build/`、`install/`、`log/` | colcon 建置產物與建置日誌 |
+| `車子資料/`、根目錄 PDF | 硬體與底盤參考資料 |
+
+`scripts/launch_rl_training.sh` 雖然仍保留，但引用的舊 PPO 程式已刪除，**目前不能用來訓練**。舊 checkpoint、示範資料或日誌即使仍在磁碟，也不會被現有直行控制器載入。
+
+## 診斷與測試
+
+在模擬運行時，另開終端：
+
+```bash
+cd /home/an/Desktop/4wd
+source /opt/ros/humble/setup.bash
+ros2 topic list
+ros2 topic hz /scan
+```
+
+停止頻率檢查後，可執行只讀取感測資料、不發布速度的診斷：
+
+```bash
+/usr/bin/python3 rl_pig_pen/check_lidar.py
+```
+
+啟動失敗或缺少資料時，優先檢查：
+
+- `logs/gz_sim_server.log`：世界、資源與感測器載入。
+- `logs/gz_sim_gui.log`：Gazebo 視窗與顯示問題。
+- `logs/spawn.log`：機器人生成。
+- `logs/ros_gz_bridge.log`：ROS／Gazebo 通訊。
+
+使用 `--env-id N` 時，上述日誌位於 `logs/env_N/`。LiDAR 全為無效值可能涉及渲染、資源或感測器設定，不應只憑症狀認定單一原因。結束模擬請優先使用啟動終端的 `Ctrl-C`，避免廣泛終止其他 ROS／Gazebo 工作。
+
+不啟動 Gazebo 的靜態檢查：
+
+```bash
+bash -n scripts/launch_clean.sh scripts/spawn_robot.sh
+source /opt/ros/humble/setup.bash
+OPENBLAS_NUM_THREADS=1 /usr/bin/python3 -B -m unittest discover -s rl_pig_pen/tests -v
+```
+
+測試涵蓋場景準備、靜態雷達下的完整路線、初始偏移及感測異常停止；理想運動測試不代表已通過 Gazebo 物理或實體車驗收。
+
+## 安全限制與後續方向
+
+原本直行控制器尚未具備掃描過期停車、低可信度停車、完整車體碰撞檢查及路線完成判斷。新巡邏入口另加入感測失聯、追蹤異常與障礙淨空保護，但仍需實測；目前也沒有避障繞行功能。模擬啟動中的靜態 `odom → base_link` TF 不等同於移動中的定位結果，尚未提供完整驗證的 SLAM／Nav2 啟動流程。
+
+實體部署時，LiDAR 驅動、速度介面、指令逾時停車與急停需要分別確認。現有串口轉接腳本會重送最後收到的速度，不能假設上層失聯便會自動停車；本次整理並未修改底盤程式。
+
+後續優先以 Gazebo 驗證完整傳統巡邏在滑動、延遲與動態障礙下的表現，再評估是否需要 RL 處理特定轉彎任務。

@@ -1,200 +1,168 @@
-# 38 維局部導航與完整巡邏
+# LiDAR 傳統直行與巡邏控制
 
-`PigPenEnv(mode="train")` 僅訓練走道內的 PPO 動作。
-`PigPenEnv(mode="patrol")` 用同一感測介面整合狀態機，供 `test_model.py` 評估；
-整張地圖訓練使用 `PatrolTrainingEnv`（`train_ppo.py --mode patrol`），
-由它處理狀態機接管期間的動作，避免把自動轉向誤當成 PPO 選擇的動作。
+目前可執行的入口是 [fsm_patrol.py](fsm_patrol.py)：讀取 LiDAR，使用比例控制修正車身方向與左右置中，前方障礙過近時停車。控制器不讀取底盤 odom／IMU，也不需要載入模型。
 
-## 整張地圖訓練
+舊 PPO／BC 訓練、評估程式及其專用測試已移除。原有的模型、日誌與 `waypoints.json` 不會被目前控制器載入。
 
-每回合從 `patrol_config.json` 的起點 `(0.0, -11.3, π/2)` 出發，位於第一段主線入口內側，依序進入三個路口兩側的六條支線，
-到達各末端、掉頭、返回主幹道，最後到達主幹道末端。路口不再結束回合。
-碰撞、卡住、狀態機失敗、感測逾時或 12000 個物理控制步的上限會提前結束。
+原本的 `fsm_patrol.py` 保持直行功能。新增的 [fsm_lidar_patrol.py](fsm_lidar_patrol.py) 提供傳統演算法完整巡邏，兩個入口擇一執行。
 
-PPO 仍看 38 維感測、負責走道前進與避障。路線記憶、選向與掉頭由狀態機負責。
-巡邏模式動作允許線速度為負值，範圍為 `[-1, 1] m/s`；狀態機的路口轉向使用 90 度原地旋轉，
-支線端點以倒車或前進返回，不做 180 度原地掉頭。原地旋轉仍會檢查車身周圍淨空。
-每次 Gym `step` 先執行一次 PPO 動作，再完成必要的狀態機操作，
-直到下一個由 PPO 控制的位置才回傳觀察。起點接近第一段走道的動作在 `reset` 完成。
-所以 PPO 不會收到未被採用的動作資料；這是混合架構訓練，不是神經網路獨自學會路線。
+## 完整巡邏（新增獨立入口）
 
-保留 PPO 控制那一步的原有獎勵，另加：每個支線端點 +10、每次返回 +20、全程完成 +100。
-碰撞時整個 transition 獎勵為 −100，其他失敗／超時扣 20。
-自動轉向與自動前進不累加局部速度獎勵，避免把狀態機的行駛當作 PPO 的功勞。
-折扣 `gamma` 與 `--timesteps` 依 PPO 決策次數計算；一次決策可能跨越多個 FSM 控制步，
-因此不代表固定模擬時間。38 維觀察也未提供任務記憶，路線相關價值估計存在部分可觀察性。
+巡邏順序為：主幹道前進 → 路口置中 → 左轉 90° → 左支線前進到底 → 保持車頭方向倒退，穿過路口直到右支線底端 → 前進返回路口中心 → 右轉回主幹道 → 前往下一個路口。主幹道前方出現封牆時停車。
+
+路口數使用設定檔的 `junctions`（目前為 3）。完成全部路口並回到主幹道後，進入 `FINAL_MAIN`：「支線巡邏完成，沿主幹道前進至終點」。此狀態不再辨識或進入新支線，仍須由 LiDAR 連續確認前方終點牆才進入 `DONE`；不會只因支線數達標就原地結束。若路口／端點尚未巡完就遇到主幹道封牆，停車並回報 `main_end_before_patrol_complete`，不算成功完成。更換世界時需同步確認路口數設定。
+
+先依下節啟動 Gazebo，建議使用 `--lidar-only --rtf 1`。車輛應從預設起點、面朝主幹道前進方向開始。另一個終端執行：
 
 ```bash
-# 已有 Gazebo 時，從零開始或自動接續最新的整圖模型
-python3 rl_pig_pen/train_ppo.py --mode patrol --timesteps 300000
-
-# 首次切換時，也可從既有走道策略開始；之後續訓省略 --resume
-python3 rl_pig_pen/train_ppo.py --mode patrol --timesteps 300000 \
-  --resume rl_pig_pen/checkpoints_corridor38/ppo_corridor38_final.zip
-
-# 沒有 Gazebo 時，一鍵啟動模擬與整圖訓練
-bash scripts/launch_rl_training.sh --mode patrol --rtf 6 --timesteps 300000
-
-# 停止訓練後，評估整圖策略
-python3 rl_pig_pen/test_model.py --checkpoint-dir rl_pig_pen/checkpoints_patrol38 --episodes 3
+cd /home/an/Desktop/4wd
+source /opt/ros/humble/setup.bash
+/usr/bin/python3 rl_pig_pen/fsm_lidar_patrol.py
 ```
 
-整圖模型存入 `checkpoints_patrol38/`，日誌存入 `logs_patrol38/`，與走道實驗分開。
-終端印出狀態切換與每回合結束原因；`monitor.monitor.csv` 額外記錄
-`success`、`coverage`、`return_rate`、`failure_reason`。
-一鍵啟動預設另開訓練終端機，直接執行訓練，按 Ctrl-C 可中止並存檔。
-每 15 秒顯示本次步數／目標、百分比、累積步數、決策速度、經過時間、
-近期平均獎勵、巡邏狀態與返回支線數；FSM 接管期間也會顯示摘要。
-每回合列出獎勵、步數和中文重生原因，並累計各原因次數。
-`stuck` 表示超過 10 個模擬秒，既沒有超過 5 cm 的平移，也沒有超過 0.08 rad（約 4.6°）的旋轉；
-PPO 與狀態機的原地旋轉都視為有效移動。位移／轉角相對上次有效移動的姿態計算。
-`state_timeout` 則表示同一巡邏階段超過 90 個模擬秒，可能仍在移動或轉圈，不等於物理卡住。
-這兩種結束都會印出判定時的位移、轉角、無有效移動時間與狀態持續時間。
-啟動環境檢查、起點驗證重試與真正回合結束會分別標示，不將檢查步數算入訓練進度。
-終端輸出同步存入 `logs/rl_training_<日期時間>_<PID>.log`，
-最新檔案路徑寫在 `logs/rl_training_console.path`。
-可加 `--same-terminal` 留在目前終端；沒有桌面或 gnome-terminal 時會沿用目前終端。
-完整流程仍須透過 Gazebo 評估實際成功率，啟動訓練不表示模型已學會完成巡邏。
+執行前先停止 `fsm_patrol.py` 或鍵盤控制，確保只有一個速度發布者。巡邏控制不會自動重設車子；中途失敗後，需先確認原因並將車子恢復至適當的主幹道起始位置，再重新啟動。
 
-## 控制與巡邏記憶
+此入口使用 [lidar_patrol_controller.py](lidar_patrol_controller.py) 管理路線，並使用現有路口幾何與牆線工具：
+
+- 主幹道與支線以局部平行牆面修正方向、左右置中；倒車時反轉置中修正方向。
+- 路口以四面牆的開口估計中心；90° 轉彎追蹤同一條進入走道的方向，避免誤選垂直走道。
+- 首次確認路口仍需四面牆的開口。確認後，若完整開口辨識暫時失敗，可利用已量到的走道寬度及至少三面、分屬兩個方向的可見牆線追蹤中心；只有平行牆、配對不明確或位置／方向跳變時仍停止。追蹤不使用命令速度推算位置。
+- 完整開口辨識若出現位置或方向跳變，不直接覆蓋原本路口；先以同一筆掃描的牆線驗證既有追蹤。若牆線結果連續且通過原安全檢查便採用，否則停止。時間中斷不能用這個機制略過。
+- 置中接近目標時降低速度；若小幅越過中心，在 `junction_turn_centre_limit`（預設 0.15 m）範圍內以最高 0.05 m/s 倒退修正，仍檢查後方淨空。回到中心容許範圍且朝向對準、連續確認後才開始轉彎；超出回正範圍會停止。
+- 支線端點需同時符合近距離與橫向牆線條件；路口出入以幾何位置確認。
+- 不讀取 odom／IMU、世界座標或路徑點，也不使用命令速度積分或固定秒數判定動作完成。
+- 僅處理新時間戳的掃描；重複資料停止輸出運動。接收中斷超過 0.5 秒、時間倒退、追蹤跳變或障礙淨空不足時，進入鎖定停止狀態。
+- 看不清走道或路口時先停車，持續無法完成狀態會判定失敗。計時器只用於資料監測／失敗保護，不用來判定轉彎完成。
+
+若出現 `obstacle_clearance`，下一行「停止診斷」會保留失敗前狀態、速度命令、觸發雷達點的距離／角度及安全門檻。`footprint` 表示車體範圍內有障礙點，`travel` 表示行進方向煞停空間不足，`rotation` 表示旋轉淨空不足；`raw_valid=false` 則表示該點源於無效量測。停止後新讀到的掃描未必能代表觸發當下，請保留這兩行完整日誌。
+
+若出現 `junction_geometry_lost`，診斷會列出幾何資料中斷秒數、最後一次有效中心位置及方向。可用幾何的來源會標示為 `four_openings`（完整開口辨識）或 `tracked_walls`（已確認路口的牆面追蹤）。
+
+若新辨識被拒絕，`rejected_geometry` 會保留前後中心座標、估計位移／轉角及門檻。成功改用當前牆線時來源為 `tracked_walls_after_rejection`；若牆線也無法支持連續位置，仍會回報 `junction_position_jump` 或 `junction_axis_jump`。
+
+目前以世界檔的靜態射線與理想差速運動完成 3 個路口、6 個支線端點至主幹道終點的測試；這不等同於 Gazebo 物理模擬、動態豬隻或實車驗收。巡邏假設有可辨識的直角十字路口與封閉端牆，不具備繞過障礙或動態改道功能。
+
+## 啟動 Gazebo 與控制器
+
+以下指令以本機專案位置 `/home/an/Desktop/4wd` 為例。需要 ROS 2 Humble、Gazebo Fortress、ROS–Gazebo bridge，以及能匯入 `rclpy`、NumPy 和 ROS 訊息套件的 Python。現有直行控制不需要 PyTorch、Gymnasium 或 Stable-Baselines3。
+
+終端 1：開啟 Gazebo 視窗、世界與車子。
+
+```bash
+cd /home/an/Desktop/4wd
+bash scripts/launch_clean.sh
+```
+
+預設世界為 `worlds/pig_pen_16units.world`，機器人使用 `turn_on_wheeltec_robot/urdf/four_wheel_diff_bs_robot.urdf`。啟動腳本會建立 `/scan`、`/cmd_vel` 等橋接，但不會自動啟動直行控制器。
+
+若只需要 LiDAR，可改用下列指令；仍會開啟 Gazebo 視窗，並停用相機相關功能：
+
+```bash
+bash scripts/launch_clean.sh --lidar-only
+```
+
+`--headless` 才會關閉 Gazebo 視窗。上述兩種啟動方式擇一使用。
+
+終端 2：在模擬就緒後啟動直行控制。
+
+```bash
+cd /home/an/Desktop/4wd
+source /opt/ros/humble/setup.bash
+/usr/bin/python3 rl_pig_pen/fsm_patrol.py
+```
+
+收到第一筆掃描後，控制器會開始發布速度。請讓同一個 ROS domain 中只有一個行車控制器發布 `/cmd_vel`，避免和遙控或其他控制節點互相覆蓋指令。
+
+結束時先在控制器終端按 `Ctrl-C`，程式會發布一次零速度並退出；再停止 `launch_clean.sh`，由它清理模擬子程序。
+
+舊的 `scripts/launch_rl_training.sh` 保留在工作區，但它引用的 PPO 程式已刪除，目前不能用來啟動訓練。請使用 `launch_clean.sh` 開啟模擬。
+
+## 控制方式與參數
+
+控制器訂閱 `/scan`（`sensor_msgs/msg/LaserScan`），發布 `/cmd_vel`（`geometry_msgs/msg/Twist`）。
+
+每次控制迴圈執行以下判斷：
+
+1. 尚未收到掃描時，等待資料。
+2. 前方 ±30° 扇區的最短距離小於 0.55 m 時，發布零速度。
+3. 取左前 35°～65°、右前 −65°～−35° 扇區的最短距離，計算左右距離差。
+4. 將牆線平行誤差與左右距離差組合成角速度，配合設定的巡航速度前進。
 
 ```text
-APPROACH → MAIN → CENTER → TURN → ENTRY → OUTBOUND
-                                                ↓
-                  ENTRY ← RETURN_CENTER ← RETURN ← TURN（末端掉頭）
-                    ↓          ↓ 第二側完成
-                  第二側       TURN → EXIT → MAIN → 下一路口／DONE
+center_error = forward_left - forward_right
+angular_z = clip(1.4 × wall_parallel_error + 1.0 × center_error, -0.3, 0.3)
+linear_x = clip(cruise_speed, 0, MAX_LIN)
 ```
 
-- `APPROACH` 從既定起點保持初始航向，看到兩側走道壁後交給 RL。
-- `MAIN` 在兩側開口連續出現且走過最低距離後，確認新路口。
-- `CENTER` 前進到路口中央，`TURN` 用 odom 的相對航向誤差閉迴路轉向。
-- `ENTRY` 由狀態機穿過路口，確認支線牆面後才交給 RL。
-- `OUTBOUND` 必須走過最低支線距離且持續看到兩側邊界結束，才記錄端點。
-- `RETURN` 掉頭後返回；接近原路口時，由 `RETURN_CENTER` 接管。
-  以去程量測的相對長度及回程開口辨識確認返回，不以固定世界座標導航。
-- 第一側返回後穿越路口進入另一側，第二側返回後轉回主幹道。
-- 6 個端點「到達」與「返回」分別計數，兩者全滿且抵達主幹道末端才成功。
-- 接管動作與 RL 動作經同一安全檢查，由環境唯一發布 `/cmd_vel`。
-  卡住、未找到路口／末端、狀態超時均記為失敗；感測超時及總步數上限截斷。
+平行誤差以弧度表示，距離差以公尺表示。牆線由 [lidar_geometry.py](lidar_geometry.py) 分別擬合，再配對平行牆面。
 
-## 感測與獎勵
-
-36 條原有均勻取樣射線加上左右平均距離差及前方 ±30° 最短距離。
-三者都按 10 m 正規化；平衡值可為負數，其他維度介於 0 和 1。
-左右區域為 60°～120° 及 −120°～−60°，角度來自 LaserScan metadata。
-`lidar_yaw` 是感測器相對車頭偏角，目前 URDF 為 0，XY 位移亦為 0。
-
-一般走道每步：`-abs(balance_m) - 0.6 * actual_dt`；依 LiDAR timestamp 的實際秒數扣時間成本，不因速度快直接加分。
-片段最後一步已到開口時不扣置中分。碰撞代理判定優先，總獎勵直接為 −100。
-整圖巡邏偵測到新路口並進入中心流程時獎勵 `+5`；端點、返回與完成路線另有事件獎勵。
-無目標方向或路徑點進度獎勵。完整巡邏靠狀態機保證任務順序，
-不能用局部累積獎勵代替全程成功率。
-
-安全檢查使用所有雷達點、車體外框與速度相關的停車距離。
-這是 2D LiDAR 碰撞代理，並非 Gazebo 接觸感測器；低於雷達平面的碰撞不一定可見。
-主線與前進支線用前方 LiDAR 扇區判斷封閉末端；倒車支線則改用後方扇區，避免把車頭朝向路口時的封牆漏判。
-狀態機在路口 `TURN` 原地旋轉時暫不套用轉彎淨空門檻；旋轉完成後的下一個感測 frame
-仍會執行碰撞與障礙檢查。PPO 一般控制仍使用完整安全檢查。
-`+inf` 作為無回波；NaN、負無限與量測範圍外的有限值不視為淨空。
-無效資料過多會停車並截斷，其餘無效射線保守視為近距離。
-路口偵測另使用側向 80°～100° 的第 10 百分位距離，降低穿透欄杆縫隙的影響。
-
-## 參數與場景限制
-
-`patrol_config.json` 可用 `--config` 指定。未列出的預設值見 `navigation.Config`。
-
-| 參數 | 預設 | 用途 |
+| 項目 | 目前值 | 設定位置 |
 | --- | --- | --- |
-| `junctions` | 3 | 已知主幹道上的路口數；每路口兩側均須巡邏 |
-| `open_distance` / `wall_distance` / `end_distance` | 1.5 / 1.0 / 1.2 m | 分離路口、走道壁與封閉末端閾值 |
-| `confirm_frames` | 3 | 事件需連續成立，避免單幀誤判 |
-| `junction_advance` | 0.32 m | 確認開口後到轉向位置的相對前進距離 |
-| `min_main_run` / `min_branch_run` | 2.5 / 2.5 m | 排除剛離開路口與支線入口的重複事件 |
-| `max_branch_run` | 6 m | 未偵測到末端時的行進上限 |
-| `return_takeover` | 1.1 m | 接近原路口時交回狀態機 |
-| `half_length` / `half_width` | 0.23 / 0.21 m | 含輪子的保守平面外框 |
-| `collision_margin` / `stop_margin` | 0.02 / 0.15 m | 碰撞代理及前進停止裕量 |
-| `brake_deceleration` | 1.5 m/s² | 前進安全停車距離使用的減速度假設 |
-| `control_dt` | 1/12 模擬秒 | 配合現有 12 Hz 雷達的名義動作週期 |
+| 巡航速度 `cruise_speed` | 0.2 m/s | [patrol_config.json](patrol_config.json) |
+| 控制週期 `control_dt` | 1/12 秒，約 12 Hz | `patrol_config.json` |
+| LiDAR 安裝偏角 `lidar_yaw` | 0 rad | `patrol_config.json` |
+| 平行修正增益 `kp_heading` | 1.4 | `fsm_patrol.py` |
+| 置中修正增益 `kp_center` | 1.0 | `fsm_patrol.py` |
+| 直行時角速度上限 | ±0.3 rad/s | `fsm_patrol.py`，另受 `MAX_ANG` 限制 |
+| 前方停車門檻 | 0.55 m | `fsm_patrol.py` |
+| 共用速度上限 `MAX_LIN`／`MAX_ANG` | 0.5 m/s／0.6 rad/s | [navigation.py](navigation.py) |
 
-目前是「已知直線主幹道＋依序三個十字路口＋開放支線末端」的拓樸巡邏，
-不處理任意路網重定位、漏掉路口後的恢復或封閉式死路。
-更換場景、雷達安裝位置或欄杆模型後需要重新驗證上述閾值。
+設定檔固定從 `navigation.py` 同目錄的 `patrol_config.json` 載入；目前入口沒有自訂 `--config` 參數。修改後需重啟控制器。
 
-訓練 reset 會隨機選擇目前世界檔內的主幹道／支線走道中段，加入橫向及航向擾動。
-主幹道出生點在 `x = 0`，朝南或北；支線出生點在 `x = ±2.5`、
-`y = -10、-8.5、-4、-2.5、2.5、4、8.5、10`，朝東或西。PPO 從走道內開始；
-十字路口中央的轉向由巡邏狀態機處理。
-這些世界座標只用於模擬出生，不作為觀察、獎勵或導航目標。
-改動欄舍排列時，也需要更新 `PigPenEnv._training_spawn()` 的安全出生區域。
+`control_dt` 用於 ROS timer 排程。現有程式會讀取最新快取掃描，未做到每筆新掃描只控制一次，也沒有以計時器判定轉彎或路口置中完成的流程。
 
-重設後先等待 teleport 回覆之後收到的感測資料，再等待 0.5 模擬秒穩定。
-起點須連續 `confirm_frames`（預設 3）幀通過碰撞與兩側走道檢查；單幀判定不符
-不會立即中止。每個起點最多觀察 `reset_validation_frames`（預設 24）幀，
-仍不合格時重新抽選起點，最多 `reset_attempts`（預設 5）次。
-若始終不合格，會停車並報告出生姿態、左右距離、碰撞狀態，不會略過安全檢查。
-感測逾時與 teleport 服務失敗仍直接報錯；巡邏模式不隨機改變既定起點。
+JSON 仍保留 `junctions`、`start`、`turn_speed` 等舊巡邏欄位。它們仍接受共用設定驗證，但不會讓目前直行節點執行巡邏、重設車子或轉彎。Gazebo 出生位置由 `launch_clean.sh` 的生成指令設定。
 
-Gazebo 自由運行，程式以感測時間戳等待下一幀，不能宣稱嚴格的物理鎖步。
-每步回傳 `actual_dt`；取樣後立即送出停止命令，避免 PPO 更新期間持續行駛。
-卡住及狀態超時以模擬時間計算，感測失效等待以牆鐘時間計算。
+## 雷達診斷
 
-## 執行
+在已啟動模擬的情況下，可另開終端執行：
 
 ```bash
-# 在專案根目錄；Python 需有 ROS2、Gymnasium 及 Stable-Baselines3
-bash scripts/launch_rl_training.sh
-
-# 調整目標倍率；可先追加 30 萬步，評估局部策略再續訓
-bash scripts/launch_rl_training.sh --rtf 6 --timesteps 300000
-
-# 已開啟模擬時，可手動訓練及指定存檔位置
-python3 rl_pig_pen/train_ppo.py --timesteps 3000000
-python3 rl_pig_pen/test_model.py --episodes 3
-
-# 無 Gazebo 的邏輯／模擬 ROS 快照測試
-python3 -m unittest discover -s rl_pig_pen/tests -v
+cd /home/an/Desktop/4wd
+source /opt/ros/humble/setup.bash
+/usr/bin/python3 rl_pig_pen/check_lidar.py
 ```
 
-新版存檔為 `checkpoints_corridor38/ppo_corridor38_*.zip`，紀錄為 `logs_corridor38/`。
-自動選取最新修改的新版 checkpoint（包含 final）；續訓保留累計步數。
-舊版模型的觀察維度不同，不能直接沿用。訓練與評估不得同時連到同一個 Gazebo。
+[check_lidar.py](check_lidar.py) 收到掃描後會列出前方距離、左右邊界距離、平行誤差與擬合信心度，接著退出。它不發布速度指令。
 
-## 訓練加速
+也可檢查掃描是否持續更新：
 
-訓練啟動腳本預設 `--rtf 6`，產生暫存世界與機器人檔案；只修改目標時間倍率，
-並預設開啟 Gazebo 視窗。只有明確傳入 `--headless` 時才使用無視窗模式；`--gui` 可明確指定開窗。
-物理步長保持 0.001 s。暫存機器人停用三個相機感測器，保留原始 1640 條射線、
-12 Hz LiDAR、車體、碰撞幾何和動態豬隻。原始 world / URDF 不會被覆寫。
-可用 `--with-cameras` 保留相機，或用 `--rtf 3` 比較相同目標倍率下的效能。
-一般 GUI 啟動保留完整感測器。
+```bash
+ros2 topic hz /scan
+```
 
-無 GUI 時使用 Fortress 支援的
-[`--headless-rendering`（EGL）](https://gazebosim.org/api/gazebo/6/headless_rendering.html)。
-PPO 的小型 MLP 預設使用一個 CPU 執行緒，避免每個單筆推論啟用大量執行緒；
-可透過 `--torch-threads N` 調整。
+若啟動模擬時使用 `--env-id N`，控制器與診斷終端都需設定相同的 `ROS_DOMAIN_ID=N`。若找不到 `rclpy`，確認已載入 ROS 環境，並使用上述 `/usr/bin/python3`。
 
-RTF 是目標值，若實際世界速度已遠低於目標，提高它不會自動等比例加速。
-請以 PPO 日誌的 `fps` 衡量整體吞吐量（包含重設和更新），時間估計為
-`剩餘步數 / fps`。例如每秒 4 步時，30 萬步約 21 小時、300 萬步約 8.7 天；
-每秒 20 步時，300 萬步約 42 小時。這些是跑完步數的時間，不保證巡邏成功率。
-加速設定於下一次啟動生效；重啟後會從最新新版模型續訓。
+Gazebo 啟動日誌位於專案的 `logs/`，可查看 `gz_sim_server.log`、`gz_sim_gui.log`、`spawn.log` 和 `ros_gz_bridge.log`；使用 `--env-id N` 時改存於 `logs/env_N/`。
 
-測試包含由目前世界檔欄舍外框生成的射線及運動學巡邏測試。它使用確定式走道控制，
-用來檢查狀態機順序與控制交接，不代表 PPO 已學會導航，也不能代替實際 Gazebo
-欄杆掃描、車輪動力學與訓練完成後的巡邏評估。
+## 現有檔案與功能範圍
 
-2026-09-17 驗證：23 項自動測試通過；隔離 Gazebo 短測試通過 SB3 環境介面
-檢查、6 組種子起點與直行步進、32 步 PPO 訓練／存檔／載入，以及巡邏模式起動。
-觀測到的步進間隔為約 0.083 模擬秒。短測試模型只放在 `/tmp`，不當作正式策略。
-尚未完成正式策略訓練與 Gazebo 全程巡邏成功率驗收。
+| 檔案 | 用途 |
+| --- | --- |
+| [fsm_patrol.py](fsm_patrol.py) | 可執行的傳統直行控制節點 |
+| [fsm_lidar_patrol.py](fsm_lidar_patrol.py) | 獨立的完整巡邏 ROS 節點及掃描失聯監測 |
+| [lidar_patrol_controller.py](lidar_patrol_controller.py) | LiDAR 路線狀態機、前進／倒車／路口閉迴路控制 |
+| [check_lidar.py](check_lidar.py) | LiDAR 特徵診斷 |
+| [navigation.py](navigation.py) | 設定、掃描特徵及共用工具；仍含未由直行節點使用的舊獎勵／安全函式 |
+| [lidar_geometry.py](lidar_geometry.py) | 牆線擬合與走道方向估計 |
+| [junction_localization.py](junction_localization.py) | 路口中心與方向追蹤，供新巡邏控制器使用 |
+| [patrol_config.json](patrol_config.json) | 共用設定 |
+| [tests/lidar_scene.py](tests/lidar_scene.py) | 世界檔靜態碰撞幾何的測試射線工具 |
+| [tests/test_training_scene.py](tests/test_training_scene.py) | 驗證啟動用暫存場景、LiDAR 與碰撞幾何的保留方式 |
 
-後續修正重設判定：30 項自動測試通過。使用專案 `env` 與實際
-`launch_rl_training.sh`，重現首個起點右側距離估計為 1.525 m 而未通過；
-新版自動換點後通過 `check_env`，並完成 128 步短訓練及正常清理。
-此驗證使用 `/tmp` 的短 rollout 測試模型，正式訓練參數與模型未被更動。
+原本直行腳本的停車判斷只使用前方距離門檻，並未呼叫 `navigation.safe_command()` 或完整車體碰撞檢查，也沒有掃描過期檢查；前方障礙離開後會恢復前進。上述限制描述的是原本直行腳本，新巡邏入口另有淨空與資料失聯保護。
 
-加速場景驗證：3 項額外測試確認來源檔不變、碰撞幾何／LiDAR 不變及倍率檢查；
-Gazebo 感測介面與 64 步短訓練通過。同時有另一個模擬在訓練時，此短測為
-64 步／18.65 秒（約 3.43 步／秒），不能當成單獨執行的加速成果。
+保留的測試可從專案根目錄執行：
+
+```bash
+source /opt/ros/humble/setup.bash
+OPENBLAS_NUM_THREADS=1 /usr/bin/python3 -B -m unittest discover -s rl_pig_pen/tests -v
+```
+
+測試包含場景準備、靜態雷達完整巡邏、初始位置偏差、修正方向及感測異常停止。ROS 節點測試使用模擬發布者，不會發送車輛命令；未載入 ROS 環境時會略過該部分。
+
+## 後續驗證方向
+
+目前以傳統閉迴路控制及 FSM 完成路線邏輯，接下來需在 Gazebo 實測滑動、延遲、感測雜訊與動態障礙對控制的影響，再進行 Xavier／實體車驗證。
+
+RL 轉彎仍未實作，可在傳統控制基準完成實測後，依需求評估。
