@@ -69,6 +69,11 @@ class Config:
     return_takeover: float = 1.1
     return_tolerance: float = 0.10
     entry_distance: float = 0.9
+    # Precise wall following still targets yaw_tolerance and 5 cm. These
+    # wider limits only decide when the corridor controller can safely take
+    # over from junction tracking after a turn.
+    entry_handoff_yaw_tolerance: float = math.radians(5.0)
+    entry_handoff_wall_offset: float = 0.12
     stuck_seconds: float = 10.0
     state_timeout: float = 90.0
     train_max_steps: int = 600
@@ -81,6 +86,7 @@ def load_config(path=CONFIG_FILE):
     positive = ("half_length", "half_width", "control_dt", "sensor_timeout",
                 "open_distance", "wall_distance", "end_distance", "brake_deceleration",
                 "cruise_speed", "turn_speed", "yaw_tolerance", "entry_distance",
+                "entry_handoff_yaw_tolerance", "entry_handoff_wall_offset",
                 "min_main_run", "min_branch_run", "max_branch_run", "max_main_run",
                 "return_takeover", "return_tolerance", "stuck_seconds", "state_timeout",
                 "junction_fit_radius", "junction_acquire_distance", "junction_centre_tolerance",
@@ -113,6 +119,11 @@ def load_config(path=CONFIG_FILE):
             cfg.junction_centre_tolerance < cfg.junction_turn_centre_limit and
             cfg.junction_centre_tolerance < cfg.junction_acquire_distance < cfg.junction_fit_radius):
         raise ValueError("Invalid junction confidence, tracking angle or geometry distances")
+    if (cfg.entry_handoff_yaw_tolerance < cfg.yaw_tolerance or
+            cfg.entry_handoff_yaw_tolerance >= math.pi / 4 or
+            cfg.entry_handoff_wall_offset < cfg.junction_centre_tolerance or
+            cfg.entry_handoff_wall_offset >= cfg.wall_distance - cfg.half_width):
+        raise ValueError("Invalid entry corridor handoff tolerances")
     return cfg
 
 
@@ -213,6 +224,64 @@ def collision_detected(features, cfg):
                        (np.abs(y) < cfg.half_width + cfg.collision_margin)))
 
 
+def command_clearance_masks(action, features, cfg, measured_speed=0.0,
+                            check_turn_clearance=True):
+    """Return obstacle masks for the commanded motion's swept body area.
+
+    In-place rotation needs the full circumscribed circle. Simultaneous linear
+    and angular motion instead samples the commanded arc through the reaction,
+    braking and stop-margin distance. This avoids treating every small corridor
+    steering correction as a 360-degree spin while retaining corner clearance.
+    """
+    vx, wz = map(float, action)
+    x = features.ranges * np.cos(features.angles)
+    y = features.ranges * np.sin(features.angles)
+    speed = max(abs(vx), abs(measured_speed))
+    braking = speed * cfg.control_dt + speed ** 2 / (2 * cfg.brake_deceleration)
+    travel_limit = cfg.half_length + cfg.stop_margin + braking
+    rotation_limit = math.hypot(cfg.half_length, cfg.half_width) + cfg.collision_margin
+    direction = 1.0 if vx >= 0 else -1.0
+    along = direction * x
+    masks = {
+        "footprint": ((np.abs(x) < cfg.half_length + cfg.collision_margin) &
+                      (np.abs(y) < cfg.half_width + cfg.collision_margin)),
+        "travel": ((abs(vx) > 0) & (along > 0) & (along < travel_limit) &
+                   (np.abs(y) < cfg.half_width + .03)),
+        "rotation": np.zeros(features.ranges.shape, dtype=bool),
+        "sweep": np.zeros(features.ranges.shape, dtype=bool),
+    }
+    sweep_distance = sweep_angle = 0.0
+    if check_turn_clearance and abs(wz) > 0:
+        if abs(vx) <= .02:
+            masks["rotation"] = features.ranges < rotation_limit
+        else:
+            sweep_distance = cfg.stop_margin + braking
+            curvature = wz / vx
+            sweep_angle = abs(curvature * sweep_distance)
+            samples = max(2, int(math.ceil(sweep_distance / .01)),
+                          int(math.ceil(sweep_angle / .03))) + 1
+            half_length = cfg.half_length + cfg.collision_margin + .005
+            half_width = cfg.half_width + cfg.collision_margin + .005
+            for distance in np.linspace(0.0, direction * sweep_distance, samples)[1:]:
+                theta = curvature * distance
+                centre_x = math.sin(theta) / curvature
+                centre_y = (1 - math.cos(theta)) / curvature
+                dx, dy = x - centre_x, y - centre_y
+                c, s = math.cos(theta), math.sin(theta)
+                body_x = c * dx + s * dy
+                body_y = -s * dx + c * dy
+                masks["sweep"] |= ((np.abs(body_x) < half_length) &
+                                   (np.abs(body_y) < half_width))
+    metrics = {
+        "braking_m": float(braking),
+        "travel_limit_m": float(travel_limit),
+        "rotation_limit_m": float(rotation_limit),
+        "sweep_distance_m": float(sweep_distance),
+        "sweep_angle_rad": float(sweep_angle),
+    }
+    return masks, metrics
+
+
 def safe_command(action, features, cfg, measured_speed=0.0, allow_reverse=False,
                  check_turn_clearance=True, enable_safety=True):
     """根據雷達障礙物距離評估動作安全性並輸出安全控制量。"""
@@ -227,25 +296,9 @@ def safe_command(action, features, cfg, measured_speed=0.0, allow_reverse=False,
     if not enable_safety:
         return np.array([vx, wz]), False
 
-    x = features.ranges * np.cos(features.angles)
-    y = features.ranges * np.sin(features.angles)
-    speed = max(abs(vx), abs(measured_speed))
-    braking = speed * cfg.control_dt + speed ** 2 / (2 * cfg.brake_deceleration)
-    direction = 1.0 if vx >= 0 else -1.0
-    longitudinal = direction * x
-
-    # 橫向只取車寬 + 3cm (0.21 + 0.03 = 0.24m)，防止窄走道兩側欄杆誤觸前方煞停
-    lateral_limit = cfg.half_width + 0.03
-    blocked = bool(np.any((longitudinal > 0) &
-                          (longitudinal < cfg.half_length + cfg.stop_margin + braking) &
-                          (np.abs(y) < lateral_limit)))
-
-    turning_blocked = (check_turn_clearance and
-                       bool(np.min(features.ranges) <
-                            math.hypot(cfg.half_length, cfg.half_width) + cfg.collision_margin))
-
-    stopped = (collision_detected(features, cfg) or (abs(vx) > 0 and blocked) or
-               (abs(wz) > 0 and turning_blocked))
+    masks, _ = command_clearance_masks(
+        [vx, wz], features, cfg, measured_speed, check_turn_clearance)
+    stopped = any(bool(np.any(mask)) for mask in masks.values())
 
     return (np.zeros(2) if stopped else np.array([vx, wz])), stopped
 

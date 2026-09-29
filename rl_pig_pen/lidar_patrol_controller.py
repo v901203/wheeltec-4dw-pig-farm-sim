@@ -7,7 +7,8 @@ import numpy as np
 
 from junction_localization import JunctionTracker, junction_geometry
 from lidar_geometry import axis_angle, wall_lines
-from navigation import MAX_ANG, MAX_LIN, MIN_WALL_CONFIDENCE, safe_command, wrap_angle
+from navigation import (MAX_ANG, MAX_LIN, MIN_WALL_CONFIDENCE,
+                        command_clearance_masks, safe_command, wrap_angle)
 
 
 def incoming_corridor(features, cfg):
@@ -47,11 +48,23 @@ class TraditionalPatrolController:
     """
 
     TERMINAL = ("DONE", "FAILED")
+    # One bounded escape per encounter, using junction displacement or
+    # corridor obstacle clearance depending on available observations.
+    # Time is only an abort watchdog, never a distance/completion estimate.
+    OBSTACLE_RETREAT_SPEED = .05
+    OBSTACLE_RETREAT_DISTANCE = .10
+    OBSTACLE_RETREAT_TIMEOUT = 4.0
+    OBSTACLE_RELEASE_MARGIN = .04
+    RETREAT_STATES = ("CENTER", "RETURN_CENTER", "ENTRY_LEFT", "CROSS_REVERSE", "EXIT_MAIN")
+    CORRIDOR_STATES = ("MAIN", "FINAL_MAIN", "LEFT_OUTBOUND", "REVERSE_LEFT",
+                       "RIGHT_OUTBOUND", "RETURN_RIGHT")
 
     def __init__(self, cfg):
         if cfg.entry_distance >= cfg.junction_acquire_distance - .15:
             raise ValueError("entry_distance must remain inside the junction tracking range")
-        self.cfg = replace(cfg, junction_centre_tolerance=min(.02, cfg.junction_centre_tolerance))
+        # Position is a turn-entry region, not an exact parking target.
+        # Honour the configured region (default 5 cm) from the first attempt.
+        self.cfg = cfg
         self.state = "MAIN"
         self.failure = None
         self.tracker = None
@@ -62,6 +75,10 @@ class TraditionalPatrolController:
         self.endpoints_reached = 0
         self.diagnostics = {}
         self.failure_diagnostics = {}
+        self.centre_retreat = False
+        self.centre_retries = 0
+        self.centre_limit_confirm = 0
+        self.obstacle = None
 
     def fail(self, reason):
         if self.state not in self.TERMINAL:
@@ -72,6 +89,9 @@ class TraditionalPatrolController:
 
     def _transition(self, state, stamp, *, clear_tracker=False):
         self.state, self.state_stamp, self.confirm = state, stamp, 0
+        self.centre_retreat = False
+        self.centre_retries = 0
+        self.centre_limit_confirm = 0
         if clear_tracker:
             self.tracker = None
         return np.zeros(2)
@@ -83,8 +103,184 @@ class TraditionalPatrolController:
     def _safe(self, command, features):
         output, blocked = safe_command(command, features, self.cfg, allow_reverse=True)
         if blocked:
-            self.diagnostics.update(self._clearance_details(command, features))
+            return self.stop_for_obstacle(command, features)
+        return output
+
+    def stop_for_obstacle(self, command, features):
+        """Stop first. Only possible body contact remains a latched failure.
+
+        Also called by the ROS adapter on genuine returns in a partially bad
+        scan. Such a scan can stop us, but cannot authorize retreat/resumption.
+        """
+        if self.state in self.TERMINAL:
+            return np.zeros(2)
+        details = self._clearance_details(command, features)
+        self.diagnostics.update(details)
+        guards = {hit["guard"] for hit in details["clearance_hits"]}
+        if "footprint" in guards:
             return self.fail("obstacle_clearance")
+        if self.obstacle is None:
+            self.obstacle = dict(phase="STOP", command=tuple(map(float, command)),
+                                 guards=guards, details=dict(self.diagnostics), clear_frames=0,
+                                 ready_frames=0, attempted=False, reference=None,
+                                 progress=0.0, max_progress=0.0, started=None,
+                                 mode=("clearance" if self.state in self.CORRIDOR_STATES
+                                       and self.tracker is None else "junction"),
+                                 corridor_reference=None, end_frames=0,
+                                 reason="initial_stop")
+            self.confirm = self.centre_limit_confirm = 0
+        elif self.obstacle["phase"] == "RETREAT":
+            self.obstacle.update(phase="WAIT", reason="retreat_obstructed", attempted=True)
+        return np.zeros(2)
+
+    def _obstacle_command(self, features, stamp, *, allow_retreat):
+        """Validate perception while held; only confirmed branch ends advance the route."""
+        hold = self.obstacle
+        if safe_command([0., 0.], features, self.cfg, allow_reverse=True)[1]:
+            return self.stop_for_obstacle([0., 0.], features)
+
+        corridor = incoming_corridor(features, self.cfg)
+        localized = False
+        if self.tracker is not None:
+            geometry = self._geometry(features)
+            if geometry is not None:
+                geometry = self._track_geometry(geometry, features, stamp)
+                localized = geometry is not None
+                if self.state == "FAILED":
+                    return np.zeros(2)
+            if not localized and stamp - self.tracker.stamp > self.cfg.junction_tracking_max_gap:
+                return self.fail("junction_geometry_lost")
+        else:
+            localized = corridor is not None
+
+        # A junction supplies two independent wall axes. Parallel corridor
+        # walls alone do NOT measure longitudinal displacement.
+        measured = localized and self.tracker is not None
+        yaw_change = lateral = 0.0
+        if measured:
+            if hold["reference"] is None:
+                hold["reference"] = (self.tracker.geometry.centre.copy(), self.tracker.incoming_axis)
+            centre, axis = hold["reference"]
+            yaw_change = axis - self.tracker.incoming_axis
+            c, s = math.cos(yaw_change), math.sin(yaw_change)
+            displacement = centre - np.array([[c, -s], [s, c]]) @ self.tracker.geometry.centre
+            sign = float(np.sign(hold["command"][0]))
+            hold["progress"] = -sign * float(displacement[0])
+            hold["max_progress"] = max(hold["max_progress"], hold["progress"])
+            lateral = float(displacement[1])
+
+        if not allow_retreat or not localized:
+            # A sensor pause interrupts an escape; never restart it blindly.
+            if hold["phase"] == "RETREAT":
+                hold["attempted"] = True
+            hold.update(phase="WAIT", clear_frames=0, ready_frames=0,
+                        end_frames=0,
+                        reason="sensor_pause" if not allow_retreat else "localization_unavailable")
+            return np.zeros(2)
+
+        # A permanent branch end must remain observable during an obstacle
+        # stop. Confirm the same transverse-wall evidence as normal driving;
+        # a lone close return must never advance endpoint/route counters.
+        if self.state in ("LEFT_OUTBOUND", "RIGHT_OUTBOUND"):
+            end_sign = 1 if self.state == "LEFT_OUTBOUND" else -1
+            end = self._end_wall(features, corridor, end_sign)
+            hold["end_frames"] = hold["end_frames"] + 1 if end else 0
+            if end:
+                hold.update(phase="WAIT", reason="confirming_branch_end", ready_frames=0)
+                if hold["end_frames"] >= self.cfg.confirm_frames:
+                    self.obstacle = None
+                    self.endpoints_reached += 1
+                    return self._transition("REVERSE_LEFT" if end_sign > 0 else "RETURN_RIGHT",
+                                            stamp, clear_tracker=True)
+                return np.zeros(2)
+
+        clearance_mode = hold["mode"] == "clearance"
+        if clearance_mode and hold["corridor_reference"] is None:
+            hold["corridor_reference"] = corridor
+
+        # Test the ORIGINAL intended stopping envelope, expanded by measured
+        # retreat and hysteresis. Backing away must not itself look like an
+        # obstacle removal and cause endless forward/backward oscillation.
+        # Without longitudinal localization use a conservative full escape
+        # allowance for release, NOT a claimed measurement of vehicle travel.
+        # This prevents a fixed obstacle from clearing merely because we backed
+        # away. The timeout only aborts escape; it never certifies displacement.
+        release_extra = (self.OBSTACLE_RETREAT_SPEED * self.OBSTACLE_RETREAT_TIMEOUT
+                         if clearance_mode and hold["attempted"] else hold["max_progress"])
+        release_cfg = replace(self.cfg,
+                              stop_margin=self.cfg.stop_margin + release_extra + self.OBSTACLE_RELEASE_MARGIN,
+                              half_width=self.cfg.half_width + self.OBSTACLE_RELEASE_MARGIN,
+                              collision_margin=self.cfg.collision_margin + self.OBSTACLE_RELEASE_MARGIN)
+        clear = not safe_command(hold["command"], features, release_cfg, allow_reverse=True)[1]
+        hold["clear_frames"] = hold["clear_frames"] + 1 if clear else 0
+        if clear:
+            hold.update(phase="WAIT", ready_frames=0, reason="confirming_clearance")
+            if hold["clear_frames"] >= self.cfg.confirm_frames:
+                self.obstacle = None
+                self.confirm = self.centre_limit_confirm = 0
+            return np.zeros(2)  # Recompute route control from the NEXT scan.
+
+        if hold["phase"] == "RETREAT":
+            if clearance_mode:
+                reference_heading, reference_balance = hold["corridor_reference"]
+                retreat_clear_cfg = replace(self.cfg,
+                                            stop_margin=self.cfg.stop_margin + self.OBSTACLE_RELEASE_MARGIN,
+                                            half_width=self.cfg.half_width + .04)
+                if (abs(corridor[0]) > .15 or
+                        abs(axis_angle(corridor[0] - reference_heading)) > self.cfg.yaw_tolerance or
+                        abs(corridor[1] - reference_balance) / 2 > .05):
+                    hold.update(phase="WAIT", reason="retreat_pose_uncertain")
+                elif not safe_command(hold["command"], features, retreat_clear_cfg,
+                                      allow_reverse=True)[1]:
+                    hold.update(phase="WAIT", reason="retreat_clearance_restored")
+            elif (not measured or abs(yaw_change) > self.cfg.yaw_tolerance or abs(lateral) > .05
+                    or hold["progress"] < -.03):
+                hold.update(phase="WAIT", reason="retreat_pose_uncertain")
+            elif hold["progress"] >= self.OBSTACLE_RETREAT_DISTANCE:
+                hold.update(phase="WAIT", reason="retreat_distance_reached")
+            if stamp - hold["started"] >= self.OBSTACLE_RETREAT_TIMEOUT:
+                hold.update(phase="WAIT", reason="retreat_watchdog")
+            if hold["phase"] != "RETREAT":
+                return np.zeros(2)
+
+        v, w = hold["command"]
+        tracking_room = (self.tracker is not None and
+                         np.linalg.norm(self.tracker.geometry.centre) <=
+                         self.cfg.junction_acquire_distance - self.OBSTACLE_RETREAT_DISTANCE - .05)
+        motion_obstacle = ("travel" in hold["guards"] and
+                           hold["guards"].issubset({"travel", "sweep"}))
+        eligible = (self.state in self.RETREAT_STATES and measured and v != 0
+                    and motion_obstacle and abs(w) <= .15
+                    and abs(yaw_change) <= self.cfg.yaw_tolerance and abs(lateral) <= .05
+                    and tracking_room
+                    and min(abs(axis_angle(a)) for a in self.tracker.geometry.axes) <= self.cfg.yaw_tolerance)
+        if clearance_mode:
+            eligible = (v != 0 and bool(hold["guards"]) and
+                        hold["guards"].issubset({"travel", "sweep"}) and
+                        corridor is not None and abs(corridor[0]) <= .15)
+        if hold["phase"] != "RETREAT":
+            if not eligible or hold["attempted"]:
+                hold.update(phase="WAIT", ready_frames=0,
+                            reason=hold["reason"] if hold["attempted"] else "retreat_unobservable_or_ineligible")
+                return np.zeros(2)
+            hold["ready_frames"] += 1
+
+        reverse = [-float(np.sign(v)) * self.OBSTACLE_RETREAT_SPEED, 0.]
+        # Check the entire remaining straight escape sweep, including a wider
+        # lateral margin and the existing reaction/braking allowance.
+        remaining = max(0., self.OBSTACLE_RETREAT_DISTANCE - hold["progress"])
+        retreat_cfg = replace(self.cfg, half_width=self.cfg.half_width + .05,
+                              stop_margin=max(self.cfg.stop_margin, remaining + .05))
+        output, blocked = safe_command(reverse, features, retreat_cfg, allow_reverse=True)
+        if blocked:
+            hold.update(phase="WAIT", attempted=True, reason="reverse_path_blocked")
+            return np.zeros(2)
+        if hold["phase"] != "RETREAT":
+            if hold["ready_frames"] < self.cfg.confirm_frames:
+                hold.update(phase="STOP", reason="confirming_retreat_path")
+                return np.zeros(2)
+            hold.update(phase="RETREAT", attempted=True, started=stamp,
+                        reason="clearance_retreat" if clearance_mode else "measured_retreat")
         return output
 
     def _clearance_details(self, command, features):
@@ -97,17 +293,7 @@ class TraditionalPatrolController:
         v, w = np.clip(command, [-MAX_LIN, -MAX_ANG], [MAX_LIN, MAX_ANG])
         x = features.ranges * np.cos(features.angles)
         y = features.ranges * np.sin(features.angles)
-        braking = abs(v) * cfg.control_dt + v ** 2 / (2 * cfg.brake_deceleration)
-        travel_limit = cfg.half_length + cfg.stop_margin + braking
-        rotation_limit = math.hypot(cfg.half_length, cfg.half_width) + cfg.collision_margin
-        along = x if v >= 0 else -x
-        masks = {
-            "footprint": ((np.abs(x) < cfg.half_length + cfg.collision_margin) &
-                          (np.abs(y) < cfg.half_width + cfg.collision_margin)),
-            "travel": ((abs(v) > 0) & (along > 0) & (along < travel_limit) &
-                       (np.abs(y) < cfg.half_width + .03)),
-            "rotation": (abs(w) > 0) & (features.ranges < rotation_limit),
-        }
+        masks, metrics = command_clearance_masks([v, w], features, cfg)
         hits = []
         for guard, mask in masks.items():
             indices = np.flatnonzero(mask)
@@ -118,8 +304,7 @@ class TraditionalPatrolController:
                          "range_m": float(features.ranges[index]),
                          "angle_deg": math.degrees(float(features.angles[index])),
                          "x_m": float(x[index]), "y_m": float(y[index])})
-        return {"requested_v": float(v), "requested_w": float(w),
-                "travel_limit_m": float(travel_limit), "rotation_limit_m": rotation_limit,
+        return {"requested_v": float(v), "requested_w": float(w), **metrics,
                 "footprint_half_length_m": cfg.half_length + cfg.collision_margin,
                 "footprint_half_width_m": cfg.half_width + cfg.collision_margin,
                 "clearance_hits": hits}
@@ -189,7 +374,13 @@ class TraditionalPatrolController:
             return np.zeros(2)
         heading, balance = corridor
         w = 1.4 * heading + sign * balance
-        return self._safe([sign * self.cfg.cruise_speed, np.clip(w, -.3, .3)], features)
+        speed = self.cfg.cruise_speed
+        distance = features.front_wall_m if sign > 0 else features.rear_wall_m
+        if self.state in ("LEFT_OUTBOUND", "RIGHT_OUTBOUND", "MAIN", "FINAL_MAIN") and distance < .85:
+            speed = min(speed, .07)
+        # Preserve curvature when slowing near a potential end wall.
+        w = np.clip(w, -.3, .3) * speed / self.cfg.cruise_speed
+        return self._safe([sign * speed, w], features)
 
     def _end_wall(self, features, corridor, sign):
         if corridor is None or abs(corridor[0]) > .15:
@@ -208,7 +399,7 @@ class TraditionalPatrolController:
                 return True
         return False
 
-    def command(self, features, stamp):
+    def command(self, features, stamp, *, allow_retreat=True):
         if self.state in self.TERMINAL:
             return np.zeros(2)
         if not math.isfinite(stamp):
@@ -217,12 +408,21 @@ class TraditionalPatrolController:
             if stamp < self.last_stamp:
                 return self.fail("scan_time_reversed")
             if stamp == self.last_stamp:
+                if self.obstacle is not None:
+                    self.obstacle.update(phase="WAIT", clear_frames=0, ready_frames=0,
+                                         end_frames=0, reason="repeated_scan_stamp")
                 return np.zeros(2)
             if stamp - self.last_stamp > self.cfg.junction_tracking_max_gap:
                 return self.fail("scan_gap")
+        previous_stamp = self.last_stamp
         self.last_stamp = stamp
         if self.state_stamp is None:
             self.state_stamp = stamp
+        if self.obstacle is not None:
+            # Waiting for a real obstacle is not a failed route manoeuvre.
+            if previous_stamp is not None:
+                self.state_stamp += stamp - previous_stamp
+            return self._obstacle_command(features, stamp, allow_retreat=allow_retreat)
         if stamp - self.state_stamp > self.cfg.state_timeout:
             return self.fail("state_timeout")
 
@@ -265,6 +465,7 @@ class TraditionalPatrolController:
         geometry = self._geometry(features)
         if geometry is None:
             self.confirm = 0
+            self.centre_limit_confirm = 0
             self.diagnostics.update(
                 geometry_source="unavailable",
                 geometry_missing_seconds=stamp - self.tracker.stamp,
@@ -288,21 +489,71 @@ class TraditionalPatrolController:
             # do not stop exactly on the estimated centre. Retreat only within
             # the existing local turn-centre envelope, with rear clearance.
             recovery_limit = self.cfg.junction_turn_centre_limit
+            distance = float(np.linalg.norm(centre))
             self.diagnostics.update(centre_along_m=along, centre_lateral_m=lateral,
-                                    centre_recovery_limit_m=recovery_limit)
+                                    centre_recovery_limit_m=recovery_limit,
+                                    centre_distance_m=distance,
+                                    centre_target_tolerance_m=self.cfg.junction_centre_tolerance,
+                                    centre_retries=self.centre_retries,
+                                    heading_error=float(incoming))
             if along < -recovery_limit:
                 return self.fail("centre_overshoot")
-            at_centre = np.linalg.norm(centre) <= self.cfg.junction_centre_tolerance
-            if self._confirmed(at_centre and abs(incoming) <= self.cfg.yaw_tolerance):
+            tolerance = self.cfg.junction_centre_tolerance
+            in_turn_region = distance <= tolerance
+            # A differential drive cannot remove a purely lateral error by
+            # rotating in place. Make longitudinal room, then re-approach.
+            # Both phases use the CURRENT measured crossing, never elapsed
+            # time or integrated commands. Hysteresis prevents sign chatter.
+            if (not self.centre_retreat and not in_turn_region and abs(along) < .04 and
+                    abs(lateral) > tolerance and distance > tolerance):
+                if abs(lateral) > recovery_limit:
+                    self.diagnostics["centre_limit_reason"] = "lateral_out_of_bounds"
+                    return self.fail("centre_reposition_limit")
+                if self.centre_retries >= 2:
+                    # Do not fail on one noisy boundary sample, nor allow
+                    # motion outside the turn-entry region after exhausted tries.
+                    self.confirm = 0
+                    self.centre_limit_confirm += 1
+                    self.diagnostics.update(centre_phase="limit_confirmation",
+                                            centre_limit_confirm=self.centre_limit_confirm,
+                                            centre_limit_reason="retries_exhausted")
+                    if self.centre_limit_confirm >= self.cfg.confirm_frames:
+                        return self.fail("centre_reposition_limit")
+                    return self._safe([0.0, 0.0], features)
+                self.centre_retreat = True
+                self.centre_retries += 1
+                self.confirm = 0
+            self.centre_limit_confirm = 0
+            if self.centre_retreat:
+                self.diagnostics.update(centre_phase="retreat", centre_retries=self.centre_retries)
+                if along >= .35:
+                    self.centre_retreat = False
+                    return np.zeros(2)
+                # Keep the original road heading while backing away. Rear
+                # travel and rotation clearance are still checked by _safe.
+                v = -.05 if abs(incoming) <= .15 else 0.0
+                w = np.clip(self.cfg.turn_kp * incoming, -.3, .3)
+                return self._safe([v, w], features)
+            self.diagnostics.update(centre_phase="turn_ready" if in_turn_region else "approach",
+                                    centre_retries=self.centre_retries)
+            if self._confirmed(in_turn_region and abs(incoming) <= self.cfg.yaw_tolerance):
+                # Check rotation space BEFORE accepting the turn-entry pose.
+                # This is only a guard probe; no turn command is emitted here.
+                self.diagnostics["clearance_check"] = "before_turn"
+                self._safe([0.0, self.cfg.turn_speed], features)
+                if self.state == "FAILED" or self.obstacle is not None:
+                    return np.zeros(2)
                 return self._transition("TURN_LEFT" if self.state == "CENTER" else "TURN_MAIN", stamp)
             sign = -1 if along < 0 else 1
-            heading = (incoming if at_centre else incoming +
-                       sign * math.atan2(lateral, max(abs(along), .25)))
+            heading = (incoming if in_turn_region else incoming + sign * np.clip(
+                math.atan2(lateral, max(abs(along), .08)), -.55, .55))
             # Slow down before the centre; reverse corrections are capped at
             # 5 cm/s. Reverse lateral steering has the opposite sign.
             speed_limit = .05 if sign < 0 else (.08 if along < .30 else .12)
-            v = (0.0 if at_centre else sign * min(
+            v = (0.0 if in_turn_region else sign * min(
                 speed_limit, self.cfg.cruise_speed, .50 * abs(along)))
+            if abs(wrap_angle(heading)) > .3:
+                v = 0.0
             w = np.clip(self.cfg.turn_kp * wrap_angle(heading), -.3, .3)
             self.diagnostics["centre_reversing"] = v < 0
             return self._safe([v, w], features)
@@ -326,10 +577,25 @@ class TraditionalPatrolController:
         normal = np.array([-direction[1], direction[0]])
         depth = -sign * float(centre @ direction)
         lateral = float(centre @ normal)
-        self.diagnostics["entry_depth"] = depth
+        corridor = incoming_corridor(features, self.cfg)
+        wall_precise = (corridor is not None and abs(corridor[0]) <= self.cfg.yaw_tolerance
+                        and abs(corridor[1] / 2) <= self.cfg.junction_centre_tolerance)
+        # Once paired branch walls are stable, corridor following is a better
+        # reference than the increasingly distant intersection centre. The
+        # handoff envelope is deliberately wider than the 5 cm control target;
+        # normal straight driving continues reducing the residual afterwards.
+        wall_handoff = (corridor is not None
+                        and abs(corridor[0]) <= self.cfg.entry_handoff_yaw_tolerance
+                        and abs(corridor[1] / 2) <= self.cfg.entry_handoff_wall_offset)
+        self.diagnostics.update(entry_depth=depth, entry_lateral_m=lateral,
+                                entry_wall_heading_error=None if corridor is None else float(corridor[0]),
+                                entry_wall_offset_m=None if corridor is None else float(corridor[1] / 2),
+                                entry_wall_precise=bool(wall_precise),
+                                entry_wall_confirmed=bool(wall_handoff),
+                                entry_handoff_yaw_limit=self.cfg.entry_handoff_yaw_tolerance,
+                                entry_handoff_offset_limit_m=self.cfg.entry_handoff_wall_offset)
         entered = (depth >= self.cfg.entry_distance and features.walls_present(self.cfg)
-                   and abs(heading) <= self.cfg.yaw_tolerance
-                   and abs(lateral) <= .05)
+                   and wall_handoff)
         if self._confirmed(entered):
             target = {"ENTRY_LEFT": "LEFT_OUTBOUND", "CROSS_REVERSE": "RIGHT_OUTBOUND",
                       "EXIT_MAIN": "MAIN"}[self.state]
@@ -338,8 +604,19 @@ class TraditionalPatrolController:
                 if self.junctions_done >= self.cfg.junctions:
                     target = "FINAL_MAIN"
             return self._transition(target, stamp, clear_tracker=True)
-        if depth > self.cfg.junction_acquire_distance - .15:
+        # Once a safe corridor handoff is observed, hold still long enough for
+        # consecutive confirmation even if the first qualifying frame arrives
+        # just beyond the former 1.35 m failure boundary.
+        if depth > self.cfg.junction_acquire_distance - .15 and not entered:
             return self.fail("entry_not_confirmed")
-        w = np.clip(self.cfg.turn_kp * heading + sign * lateral, -.3, .3)
-        v = 0.0 if entered else sign * min(.12, self.cfg.cruise_speed)
+        # Near the crossing, steer from its tracked axes. Once entering the
+        # target corridor, use the measured parallel walls to finish alignment.
+        w = (1.4 * corridor[0] + sign * corridor[1]
+             if corridor is not None and depth >= self.cfg.entry_distance / 2
+             else self.cfg.turn_kp * heading + sign * lateral)
+        w = np.clip(w, -.3, .3)
+        # Give the wall controller more distance to converge when it is safe
+        # but outside the precise 5 cm / normal yaw target.
+        entry_speed = .12 if wall_precise or corridor is None else .07
+        v = 0.0 if entered else sign * min(entry_speed, self.cfg.cruise_speed)
         return self._safe([v, w], features)

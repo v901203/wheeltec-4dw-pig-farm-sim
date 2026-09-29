@@ -25,9 +25,12 @@ Usage:
 import sys
 import struct
 import threading
+import math
+import time
 
 import rclpy
 from rclpy.node import Node
+from rclpy.clock import Clock, ClockType
 from geometry_msgs.msg import Twist
 
 try:
@@ -51,40 +54,69 @@ class CmdVelToSTM32(Node):
         self.declare_parameter('port', '/dev/ttyUSB0')
         self.declare_parameter('baudrate', 115200)
         self.declare_parameter('publish_rate', 10)
+        self.declare_parameter('command_timeout', 0.5)
 
         port = self.get_parameter('port').get_parameter_value().string_value
         baud = self.get_parameter('baudrate').get_parameter_value().integer_value
         rate_hz = self.get_parameter('publish_rate').get_parameter_value().integer_value
+        self.command_timeout = self.get_parameter('command_timeout').value
+        if not math.isfinite(self.command_timeout) or self.command_timeout <= 0:
+            raise ValueError('command_timeout must be finite and positive')
+        if rate_hz < 1:
+            raise ValueError('publish_rate must be positive')
 
         if serial is None:
             self.get_logger().error('pyserial not available. pip install pyserial')
             raise RuntimeError('pyserial not available')
 
         try:
-            self.ser = serial.Serial(port, baudrate=baud, timeout=0.5)
+            self.ser = serial.Serial(port, baudrate=baud, timeout=0.5, write_timeout=0.1)
             self.get_logger().info(f'Opened serial {port} @ {baud}')
         except Exception as e:
             self.get_logger().error(f'Failed to open serial {port}: {e}')
             raise
 
         self.last_twist = Twist()
+        self.last_command_time = None
+        self.timed_out = False
         self.lock = threading.Lock()
 
-        self.sub = self.create_subscription(Twist, 'cmd_vel', self.cb_cmdvel, 10)
-        self.timer = self.create_timer(1.0 / max(1, rate_hz), self.timer_cb)
+        self.sub = self.create_subscription(Twist, 'cmd_vel', self.cb_cmdvel, 1)
+        self.timer = self.create_timer(1.0 / rate_hz, self.timer_cb,
+                                      clock=Clock(clock_type=ClockType.STEADY_TIME))
+        self.send_twist(Twist())
 
     def cb_cmdvel(self, msg: Twist):
         with self.lock:
-            self.last_twist = msg
+            if not all(math.isfinite(v) for v in (msg.linear.x, msg.linear.y, msg.angular.z)):
+                self.last_twist = Twist()
+                self.last_command_time = None
+                self.get_logger().error('Invalid cmd_vel; stopping until a fresh finite command arrives')
+            else:
+                self.last_twist = msg
+                self.last_command_time = time.monotonic()
+                self.timed_out = False
 
     def timer_cb(self):
         with self.lock:
-            t = self.last_twist
+            expired = (self.last_command_time is None or
+                       time.monotonic() - self.last_command_time >= self.command_timeout)
+            t = Twist() if expired else self.last_twist
+            if expired and self.last_command_time is not None and not self.timed_out:
+                self.get_logger().warning('cmd_vel timeout; sending zero velocity')
+                self.timed_out = True
+        self.send_twist(t)
 
+    def send_twist(self, t):
         # Convert: linear x,y in m/s -> mm/s (int)
-        x_mm = int(round(t.linear.x * 1000.0))
-        y_mm = int(round(t.linear.y * 1000.0))
-        z_val = int(round(t.angular.z * 1000.0))
+        # Bound before multiplication, so even a huge finite input cannot
+        # overflow and prevent the timer from sending subsequent stop packets.
+        def scaled(value):
+            return int(round(min(32.767, max(-32.768, value)) * 1000.0))
+
+        x_mm = scaled(t.linear.x)
+        y_mm = scaled(t.linear.y)
+        z_val = scaled(t.angular.z)
 
         x_mm = clamp_short(x_mm)
         y_mm = clamp_short(y_mm)
@@ -111,6 +143,19 @@ class CmdVelToSTM32(Node):
             # optional flush
         except Exception as e:
             self.get_logger().error(f'Error writing serial: {e}')
+            # Do not replay the cached motion if the link later recovers.
+            with self.lock:
+                self.last_twist = Twist()
+                self.last_command_time = None
+
+    def stop_and_close(self):
+        """Best effort only: SIGKILL, power loss and a broken link need a
+        chassis-side watchdog; this process cannot protect its own death.
+        """
+        try:
+            self.send_twist(Twist())
+        finally:
+            self.ser.close()
 
 
 def main(args=None):
@@ -127,7 +172,7 @@ def main(args=None):
         pass
     finally:
         try:
-            node.ser.close()
+            node.stop_and_close()
         except Exception:
             pass
         node.destroy_node()

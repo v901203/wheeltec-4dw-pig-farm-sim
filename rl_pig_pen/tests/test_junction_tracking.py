@@ -99,7 +99,8 @@ class JunctionTrackingTests(unittest.TestCase):
             pose += np.array([v * math.cos(pose[2]), v * math.sin(pose[2]), w]) / 12
         self.assertTrue(saw_fallback)
         self.assertEqual(controller.state, "TURN_LEFT")
-        self.assertLess(np.linalg.norm(controller.tracker.geometry.centre), .02)
+        self.assertLessEqual(np.linalg.norm(controller.tracker.geometry.centre),
+                             controller.cfg.junction_centre_tolerance)
 
 
 if __name__ == "__main__":
