@@ -58,6 +58,15 @@ class TraditionalPatrolController:
     RETREAT_STATES = ("CENTER", "RETURN_CENTER", "ENTRY_LEFT", "CROSS_REVERSE", "EXIT_MAIN")
     CORRIDOR_STATES = ("MAIN", "FINAL_MAIN", "LEFT_OUTBOUND", "REVERSE_LEFT",
                        "RIGHT_OUTBOUND", "RETURN_RIGHT")
+    ENTRY_STATES = ("ENTRY_LEFT", "CROSS_REVERSE", "EXIT_MAIN")
+    # These failures describe a lost or inconsistent local pose, not a proven
+    # collision.  Hold position and reacquire current geometry before deciding
+    # that the route itself has failed.
+    RELOCALIZATION_REASONS = (
+        "junction_position_jump", "junction_axis_jump", "junction_scan_gap", "scan_gap",
+        "junction_geometry_lost", "centre_overshoot", "centre_reposition_limit",
+        "turn_centre_drift", "entry_not_confirmed", "state_timeout",
+    )
 
     def __init__(self, cfg):
         if cfg.entry_distance >= cfg.junction_acquire_distance - .15:
@@ -79,12 +88,135 @@ class TraditionalPatrolController:
         self.centre_retries = 0
         self.centre_limit_confirm = 0
         self.obstacle = None
+        self.entry_phase = "JUNCTION"
+        self.relocalization = None
+        self.relocalization_attempts = 0
 
     def fail(self, reason):
+        if reason in self.RELOCALIZATION_REASONS and self.state not in self.TERMINAL:
+            return self._start_relocalization(reason)
         if self.state not in self.TERMINAL:
             self.failure_diagnostics = dict(self.diagnostics, failed_state=self.state)
             self.failure = reason
             self.state = "FAILED"
+        return np.zeros(2)
+
+    def _start_relocalization(self, reason):
+        """Stop without discarding route progress, then seek a stable local pose."""
+        if self.relocalization is None:
+            self.relocalization_attempts += 1
+            heading_hint = (0.0 if self.tracker is None
+                            else float(self.tracker.incoming_axis))
+            self.relocalization = {
+                "reason": reason,
+                "failed_state": self.state,
+                "started": self.last_stamp,
+                "frames": 0,
+                "candidate": None,
+                "heading_hint": heading_hint,
+                "diagnostics": dict(self.diagnostics),
+            }
+        self.confirm = self.centre_limit_confirm = 0
+        self.centre_retreat = False
+        return np.zeros(2)
+
+    def _fresh_junction_geometry(self, features):
+        """Acquire a crossing independently of the possibly stale tracker."""
+        for scale in (1.0, .8, .65):
+            geometry = junction_geometry(features, replace(
+                self.cfg, junction_fit_radius=scale * self.cfg.junction_fit_radius))
+            if geometry is not None:
+                return geometry
+        return None
+
+    def _finish_relocalization(self, stamp, tracker=None, *, corridor=False):
+        recovery = self.relocalization
+        self.tracker = tracker
+        if corridor and self.state in self.ENTRY_STATES:
+            self.entry_phase = "WALL_CONFIRM"
+        self.relocalization = None
+        self.confirm = self.centre_limit_confirm = 0
+        self.centre_retreat = False
+        self.centre_retries = 0
+        # Recovery time is a stationary safety hold, not manoeuvre time.
+        self.state_stamp = stamp
+        self.diagnostics = {
+            "relocalization_status": "recovered",
+            "relocalization_reason": recovery["reason"],
+            "relocalization_attempt": self.relocalization_attempts,
+            "relocalization_source": "corridor_walls" if corridor else "four_openings",
+        }
+        return np.zeros(2)
+
+    def _relocalization_command(self, features, stamp):
+        """Require consecutive self-consistent measurements while stopped."""
+        recovery = self.relocalization
+        self.diagnostics = {
+            "relocalization_status": "waiting",
+            "relocalization_reason": recovery["reason"],
+            "relocalization_state": recovery["failed_state"],
+            "relocalization_attempt": self.relocalization_attempts,
+            "relocalization_frames": recovery["frames"],
+            "relocalization_required_frames": self.cfg.confirm_frames,
+        }
+
+        # Near the branch handoff the complete four-opening junction may have
+        # legitimately left the field of view.  Stable paired corridor walls
+        # are sufficient to resume the already selected route state.
+        corridor = (incoming_corridor(features, self.cfg)
+                    if self.state in self.ENTRY_STATES + self.CORRIDOR_STATES else None)
+        if self.state in self.ENTRY_STATES:
+            wall_ready = self._entry_wall_ready(features, corridor)
+            if wall_ready:
+                recovery["frames"] += 1
+                recovery["candidate"] = None
+                self.diagnostics.update(relocalization_source="corridor_walls",
+                                        relocalization_frames=recovery["frames"])
+                if recovery["frames"] >= self.cfg.confirm_frames:
+                    return self._finish_relocalization(stamp, corridor=True)
+                return np.zeros(2)
+
+        # Straight-road states have no longitudinal landmark to reacquire.
+        # Reconfirm both corridor walls and heading, then continue the same
+        # semantic route state; never infer travelled distance while stopped.
+        if self.state in self.CORRIDOR_STATES and corridor is not None:
+            recovery["frames"] += 1
+            recovery["candidate"] = None
+            self.diagnostics.update(relocalization_source="corridor_walls",
+                                    relocalization_frames=recovery["frames"])
+            if recovery["frames"] >= self.cfg.confirm_frames:
+                return self._finish_relocalization(stamp, corridor=True)
+            return np.zeros(2)
+
+        geometry = self._fresh_junction_geometry(features)
+        if geometry is None:
+            recovery["frames"] = 0
+            recovery["candidate"] = None
+            self.diagnostics["relocalization_source"] = "unavailable"
+            return np.zeros(2)
+
+        candidate = recovery["candidate"]
+        if candidate is None:
+            candidate = JunctionTracker(geometry, stamp, self.cfg,
+                                        heading_hint=recovery["heading_hint"])
+            recovery["candidate"] = candidate
+            recovery["frames"] = 1
+        elif candidate.update(geometry, stamp):
+            recovery["frames"] += 1
+        else:
+            # The proposed replacement also jumped. Start a new confirmation
+            # sequence from this frame; never average incompatible centres.
+            candidate = JunctionTracker(geometry, stamp, self.cfg,
+                                        heading_hint=recovery["heading_hint"])
+            recovery["candidate"] = candidate
+            recovery["frames"] = 1
+        self.diagnostics.update(
+            relocalization_source="four_openings",
+            relocalization_frames=recovery["frames"],
+            candidate_centre=candidate.geometry.centre.tolist(),
+            candidate_incoming_axis=float(candidate.incoming_axis))
+        if recovery["frames"] >= self.cfg.confirm_frames:
+            return self._finish_relocalization(stamp, tracker=candidate)
         return np.zeros(2)
 
     def _transition(self, state, stamp, *, clear_tracker=False):
@@ -92,6 +224,8 @@ class TraditionalPatrolController:
         self.centre_retreat = False
         self.centre_retries = 0
         self.centre_limit_confirm = 0
+        self.entry_phase = "JUNCTION"
+        self.relocalization = None
         if clear_tracker:
             self.tracker = None
         return np.zeros(2)
@@ -124,7 +258,8 @@ class TraditionalPatrolController:
                                  guards=guards, details=dict(self.diagnostics), clear_frames=0,
                                  ready_frames=0, attempted=False, reference=None,
                                  progress=0.0, max_progress=0.0, started=None,
-                                 mode=("clearance" if self.state in self.CORRIDOR_STATES
+                                 mode=("clearance" if (self.state in self.CORRIDOR_STATES
+                                       or self.entry_phase == "WALL_CONFIRM")
                                        and self.tracker is None else "junction"),
                                  corridor_reference=None, end_frames=0,
                                  reason="initial_stop")
@@ -399,6 +534,50 @@ class TraditionalPatrolController:
                 return True
         return False
 
+    def _entry_wall_ready(self, features, corridor):
+        # incoming_corridor already requires a fitted pair of opposite walls
+        # inside wall_distance.  The fixed +/-90 degree edge rays used by
+        # walls_present() can still look through a junction opening even when
+        # that fitted corridor is excellent; requiring both observations here
+        # can therefore stop WALL_CONFIRM forever at the crossing boundary.
+        return (corridor is not None
+                and abs(corridor[0]) <= self.cfg.entry_handoff_yaw_tolerance
+                and abs(corridor[1] / 2) <= self.cfg.entry_handoff_wall_offset)
+
+    def _entry_wall_command(self, features, stamp):
+        """Latched wall acquisition: never reacquire the distant junction.
+
+        Entry depth was measured before this phase. Wall loss interrupts
+        confirmation and stops motion; the existing state timeout bounds it.
+        """
+        corridor = incoming_corridor(features, self.cfg)
+        ready = self._entry_wall_ready(features, corridor)
+        self.diagnostics.update(
+            entry_phase=self.entry_phase, geometry_source="corridor_walls",
+            entry_wall_weight=1.0, entry_wall_confirmed=bool(ready),
+            entry_wall_heading_error=None if corridor is None else float(corridor[0]),
+            entry_wall_offset_m=None if corridor is None else float(corridor[1] / 2))
+        confirmed = self._confirmed(ready)
+        self.diagnostics["entry_confirmation_frames"] = self.confirm
+        if not ready:
+            return self._safe([0., 0.], features)
+        sign = -1 if self.state == "CROSS_REVERSE" else 1
+        # Low-speed curved correction, including during confirmation.
+        speed = min(.07, self.cfg.cruise_speed)
+        w = np.clip(1.4 * corridor[0] + sign * corridor[1], -.3, .3)
+        command = self._safe([sign * speed, w * speed / self.cfg.cruise_speed], features)
+        if self.state in self.TERMINAL or self.obstacle is not None:
+            return command
+        if confirmed:
+            target = {"ENTRY_LEFT": "LEFT_OUTBOUND", "CROSS_REVERSE": "RIGHT_OUTBOUND",
+                      "EXIT_MAIN": "MAIN"}[self.state]
+            if self.state == "EXIT_MAIN":
+                self.junctions_done += 1
+                if self.junctions_done >= self.cfg.junctions:
+                    target = "FINAL_MAIN"
+            return self._transition(target, stamp, clear_tracker=True)
+        return command
+
     def command(self, features, stamp, *, allow_retreat=True):
         if self.state in self.TERMINAL:
             return np.zeros(2)
@@ -408,6 +587,7 @@ class TraditionalPatrolController:
             if stamp < self.last_stamp:
                 return self.fail("scan_time_reversed")
             if stamp == self.last_stamp:
+                self.confirm = 0
                 if self.obstacle is not None:
                     self.obstacle.update(phase="WAIT", clear_frames=0, ready_frames=0,
                                          end_frames=0, reason="repeated_scan_stamp")
@@ -423,6 +603,10 @@ class TraditionalPatrolController:
             if previous_stamp is not None:
                 self.state_stamp += stamp - previous_stamp
             return self._obstacle_command(features, stamp, allow_retreat=allow_retreat)
+        if self.relocalization is not None:
+            if previous_stamp is not None:
+                self.state_stamp += stamp - previous_stamp
+            return self._relocalization_command(features, stamp)
         if stamp - self.state_stamp > self.cfg.state_timeout:
             return self.fail("state_timeout")
 
@@ -461,6 +645,9 @@ class TraditionalPatrolController:
                 if acquired is not None:
                     return acquired
             return self._corridor_drive(features, corridor, sign)
+
+        if self.state in self.ENTRY_STATES and self.entry_phase == "WALL_CONFIRM":
+            return self._entry_wall_command(features, stamp)
 
         geometry = self._geometry(features)
         if geometry is None:
@@ -594,29 +781,27 @@ class TraditionalPatrolController:
                                 entry_wall_confirmed=bool(wall_handoff),
                                 entry_handoff_yaw_limit=self.cfg.entry_handoff_yaw_tolerance,
                                 entry_handoff_offset_limit_m=self.cfg.entry_handoff_wall_offset)
-        entered = (depth >= self.cfg.entry_distance and features.walls_present(self.cfg)
-                   and wall_handoff)
-        if self._confirmed(entered):
-            target = {"ENTRY_LEFT": "LEFT_OUTBOUND", "CROSS_REVERSE": "RIGHT_OUTBOUND",
-                      "EXIT_MAIN": "MAIN"}[self.state]
-            if self.state == "EXIT_MAIN":
-                self.junctions_done += 1
-                if self.junctions_done >= self.cfg.junctions:
-                    target = "FINAL_MAIN"
-            return self._transition(target, stamp, clear_tracker=True)
-        # Once a safe corridor handoff is observed, hold still long enough for
-        # consecutive confirmation even if the first qualifying frame arrives
-        # just beyond the former 1.35 m failure boundary.
+        entered = depth >= self.cfg.entry_distance and self._entry_wall_ready(features, corridor)
+        if entered:
+            # Latch the measured depth once; remaining confirmation needs only
+            # current walls, even if the junction disappears on the next scan.
+            self.entry_phase = "WALL_CONFIRM"
+            self.tracker = None
+            self.confirm = 0
+            return self._entry_wall_command(features, stamp)
         if depth > self.cfg.junction_acquire_distance - .15 and not entered:
             return self.fail("entry_not_confirmed")
-        # Near the crossing, steer from its tracked axes. Once entering the
-        # target corridor, use the measured parallel walls to finish alignment.
-        w = (1.4 * corridor[0] + sign * corridor[1]
-             if corridor is not None and depth >= self.cfg.entry_distance / 2
-             else self.cfg.turn_kp * heading + sign * lateral)
-        w = np.clip(w, -.3, .3)
-        # Give the wall controller more distance to converge when it is safe
-        # but outside the precise 5 cm / normal yaw target.
+        # Blend only live measurements over the latter half of entry distance.
+        # No time integration or stale junction steering survives the handoff.
+        weight = (float(np.clip(2 * depth / self.cfg.entry_distance - 1, 0., 1.))
+                  if corridor is not None else 0.)
+        self.entry_phase = "BLEND" if weight > 0 else "JUNCTION"
+        junction_w = np.clip(self.cfg.turn_kp * heading + sign * lateral, -.3, .3)
+        wall_w = (np.clip(1.4 * corridor[0] + sign * corridor[1], -.3, .3)
+                  if corridor is not None else 0.)
+        w = (1 - weight) * junction_w + weight * wall_w
+        self.diagnostics.update(entry_phase=self.entry_phase, entry_wall_weight=weight)
         entry_speed = .12 if wall_precise or corridor is None else .07
-        v = 0.0 if entered else sign * min(entry_speed, self.cfg.cruise_speed)
+        v = sign * min(entry_speed, self.cfg.cruise_speed)
+        w *= abs(v) / self.cfg.cruise_speed
         return self._safe([v, w], features)

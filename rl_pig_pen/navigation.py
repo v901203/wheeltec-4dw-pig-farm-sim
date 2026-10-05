@@ -35,6 +35,10 @@ class Config:
     start: tuple = (0.0, -11.3, math.pi / 2)
     junctions: int = 3
     lidar_yaw: float = 0.0  # laser_link is at base x=y=0 in the supplied URDF
+    # Body-frame angles hidden by the four physical corner posts. Each pair is
+    # [low_deg, high_deg]; 0 is forward and positive angles point left.
+    lidar_ignore_sectors_deg: tuple = ((33.0, 43.0), (131.0, 141.0),
+                                       (-145.0, -134.0), (-42.0, -30.0))
     half_length: float = 0.23  # includes wheels
     half_width: float = 0.21
     collision_margin: float = 0.02
@@ -114,6 +118,14 @@ def load_config(path=CONFIG_FILE):
         raise ValueError("Margins and junction advance must be finite and nonnegative")
     if not math.isfinite(cfg.lidar_yaw):
         raise ValueError("lidar_yaw must be finite")
+    sectors = cfg.lidar_ignore_sectors_deg
+    if (not isinstance(sectors, (list, tuple)) or
+            any(not isinstance(item, (list, tuple)) or len(item) != 2 or
+                not all(isinstance(v, (int, float)) and math.isfinite(v) for v in item) or
+                not -180 <= item[0] < item[1] <= 180
+                for item in sectors) or
+            sum(item[1] - item[0] for item in sectors) > 60):
+        raise ValueError("lidar_ignore_sectors_deg must contain finite [low, high] degree pairs")
     if not (0 < cfg.junction_min_confidence <= 1 and
             cfg.junction_tracking_max_angle < math.pi/4 and
             cfg.junction_centre_tolerance < cfg.junction_turn_centre_limit and
@@ -129,6 +141,16 @@ def load_config(path=CONFIG_FILE):
 
 def wrap_angle(angle):
     return math.atan2(math.sin(angle), math.cos(angle))
+
+
+def lidar_ignore_mask(angles, cfg):
+    """Return body-fixed rays hidden by known parts of the robot."""
+    angles = np.asarray(angles, dtype=float)
+    ignored = np.zeros(angles.shape, dtype=bool)
+    for low, high in cfg.lidar_ignore_sectors_deg:
+        ignored |= ((angles >= math.radians(low) - 1e-7) &
+                    (angles <= math.radians(high) + 1e-7))
+    return ignored
 
 
 class SensorFault(RuntimeError):
@@ -183,14 +205,19 @@ def scan_features(scan, cfg):
             not math.isfinite(scan.angle_min) or
             not 0 <= scan.range_min < scan.range_max):
         raise SensorFault("Invalid LaserScan metadata or too few rays")
+    angles = scan.angle_min + np.arange(raw.size) * scan.angle_increment + cfg.lidar_yaw
+    angles = np.arctan2(np.sin(angles), np.cos(angles))
+    ignored = lidar_ignore_mask(angles, cfg)
     valid = np.isfinite(raw) & (raw >= scan.range_min) & (raw <= scan.range_max)
-    known = valid | np.isposinf(raw)
+    known = valid | np.isposinf(raw) | ignored
     if np.mean(known) < 0.95:
         raise SensorFault("More than 5% of LiDAR rays are invalid")
     arr = np.where(valid, raw, np.where(np.isposinf(raw), MAX_RANGE, 0.0))
     arr = np.clip(arr, 0.0, MAX_RANGE)
-    angles = scan.angle_min + np.arange(raw.size) * scan.angle_increment + cfg.lidar_yaw
-    angles = np.arctan2(np.sin(angles), np.cos(angles))
+    # A post return and the space behind it are both unobservable. Represent
+    # the excluded beam as no usable nearby return, so it cannot become a wall,
+    # junction edge or collision hit. Adjacent unmasked rays retain authority.
+    arr[ignored] = MAX_RANGE
 
     def sector(low, high):
         mask = (angles >= math.radians(low) - 1e-7) & (angles <= math.radians(high) + 1e-7)

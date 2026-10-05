@@ -26,7 +26,7 @@ from geometry_msgs.msg import Twist
 from sensor_msgs.msg import LaserScan
 
 from lidar_patrol_controller import TraditionalPatrolController, incoming_corridor
-from navigation import SensorFault, load_config, scan_features
+from navigation import SensorFault, lidar_ignore_mask, load_config, scan_features
 
 
 STATE_LABELS = {
@@ -66,6 +66,7 @@ class LidarPatrolNode(Node):
         self.observed_stamp = None
         self.last_command = (0.0, 0.0)
         self.reported_obstacle = None
+        self.reported_relocalization = None
         self.last_receive_interval = None
         self.receive_intervals = deque(maxlen=16)
         self.last_valid_receive = None
@@ -134,6 +135,7 @@ class LidarPatrolNode(Node):
         # Actual invalid/duplicate scans still break consecutive confirmation.
         if invalidates_progress:
             self.recovery_frames = 0
+            self.controller.confirm = 0
             self.last_valid_receive = self.last_valid_stamp = None
         if now - self.scan_hold_since >= self.cfg.sensor_timeout:
             return self.scan_health_failure(self.scan_hold_failure_reason(), now)
@@ -142,17 +144,22 @@ class LidarPatrolNode(Node):
     def measured_hazard(self, scan):
         """Use genuine returns for STOP decisions even if other rays are bad.
 
-        Unknown rays are excluded only from this positive-obstacle check;
-        they NEVER authorize motion. The separate health gate stops on any.
+        Unconfigured unknown rays are excluded only from this positive-obstacle
+        check; they NEVER authorize motion. Explicit robot self-mask rays are
+        ignored consistently here and by the separate scan feature pipeline.
         """
         raw = np.asarray(scan.ranges, dtype=float)
         if (raw.ndim != 1 or not math.isfinite(scan.angle_min) or
                 not math.isfinite(scan.angle_increment) or scan.angle_increment == 0):
             return None
+        angles = scan.angle_min + np.arange(raw.size) * scan.angle_increment + self.cfg.lidar_yaw
+        angles = np.arctan2(np.sin(angles), np.cos(angles))
+        ignored = lidar_ignore_mask(angles, self.cfg)
         valid = np.isfinite(raw) & (raw >= scan.range_min) & (raw <= scan.range_max)
+        ranges = np.where(valid, raw, 1e6)
+        ranges[ignored] = 1e6
         features = SimpleNamespace(
-            ranges=np.where(valid, raw, 1e6),
-            angles=scan.angle_min + np.arange(raw.size) * scan.angle_increment + self.cfg.lidar_yaw)
+            ranges=ranges, angles=angles)
         details = self.controller._clearance_details(self.last_command, features)
         if details["clearance_hits"]:
             self.controller.diagnostics.update(details)
@@ -193,6 +200,21 @@ class LidarPatrolNode(Node):
                 if self.reported_obstacle is None:
                     self.get_logger().warning("障礙診斷：" + json.dumps(hold["details"], ensure_ascii=False))
             self.reported_obstacle = obstacle_status
+        recovery = self.controller.relocalization
+        recovery_status = None if recovery is None else (
+            recovery["reason"], recovery["failed_state"])
+        if recovery_status != self.reported_relocalization:
+            if recovery is None:
+                if self.reported_relocalization is not None:
+                    self.get_logger().info(
+                        "重新定位完成：已取得連續一致的幾何，保留原路線狀態繼續巡邏")
+            else:
+                self.get_logger().warning(
+                    f"定位異常：{recovery['reason']}；保留狀態：{recovery['failed_state']}；"
+                    "已停車並等待重新定位")
+                self.get_logger().warning(
+                    "定位診斷：" + json.dumps(recovery["diagnostics"], ensure_ascii=False))
+            self.reported_relocalization = recovery_status
 
     def on_scan(self, scan):
         now = time.monotonic()
@@ -253,7 +275,9 @@ class LidarPatrolNode(Node):
                         else:
                             localized = (trial.tracker is not None and trial.tracker.stamp == stamp)
                             if trial.state in ("MAIN", "FINAL_MAIN", "LEFT_OUTBOUND", "REVERSE_LEFT",
-                                               "RIGHT_OUTBOUND", "RETURN_RIGHT"):
+                                               "RIGHT_OUTBOUND", "RETURN_RIGHT") or (
+                                    trial.state in trial.ENTRY_STATES
+                                    and trial.entry_phase == "WALL_CONFIRM"):
                                 localized = incoming_corridor(features, self.cfg) is not None
                             self.recovery_frames = self.recovery_frames + 1 if localized else 0
                             if self.recovery_frames >= self.cfg.confirm_frames:
@@ -270,6 +294,9 @@ class LidarPatrolNode(Node):
                                     self.controller.last_stamp = trial.last_stamp
                                     if trial.state == self.controller.state:
                                         self.controller.tracker = trial.tracker
+                                        # The wall-reference latch is perception
+                                        # state; route confirmation remains frozen.
+                                        self.controller.entry_phase = trial.entry_phase
                                 command = (0.0, 0.0)
         except (SensorFault, ValueError, FloatingPointError) as exc:
             command = self.pause_scan(f"invalid_scan: {exc}", now)

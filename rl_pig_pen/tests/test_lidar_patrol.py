@@ -568,16 +568,26 @@ class LidarPatrolTests(unittest.TestCase):
         self.assertEqual(controller.junctions_done, 2)
         self.assertIsNone(controller.failure)
 
-    def test_actual_position_jump_remains_stopped_and_records_both_centres(self):
+    def test_actual_position_jump_stops_then_relocalizes(self):
         controller = self.centre_controller("CENTER", (0., 5.60, math.pi / 2))
         reference = controller.tracker.geometry
-        command = controller.command(self.features((0., 6.10, math.pi / 2)), 1 / 12)
+        moved_features = self.features((0., 6.10, math.pi / 2))
+        command = controller.command(moved_features, 1 / 12)
         np.testing.assert_array_equal(command, [0, 0])
-        self.assertEqual(controller.failure, "junction_position_jump")
-        rejected = controller.failure_diagnostics["rejected_geometry"]
+        self.assertIsNone(controller.failure)
+        self.assertEqual(controller.state, "CENTER")
+        self.assertEqual(controller.relocalization["reason"], "junction_position_jump")
+        rejected = controller.relocalization["diagnostics"]["rejected_geometry"]
         self.assertGreater(rejected["translation_delta_m"], .25)
         np.testing.assert_array_equal(rejected["previous_centre"], reference.centre)
         self.assertIs(controller.tracker.geometry, reference)
+        for index in range(1, self.cfg.confirm_frames + 1):
+            np.testing.assert_array_equal(
+                controller.command(moved_features, (index + 1) / 12), [0, 0])
+        self.assertIsNone(controller.relocalization)
+        self.assertIsNone(controller.failure)
+        self.assertEqual(controller.state, "CENTER")
+        self.assertEqual(controller.diagnostics["relocalization_status"], "recovered")
 
     def test_bad_detection_without_visible_walls_cannot_use_cached_centre(self):
         pose = (0., 5.60, math.pi / 2)
