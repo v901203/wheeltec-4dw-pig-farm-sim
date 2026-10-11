@@ -6,6 +6,10 @@
   "lidar_yaw": 0.0,
   "lidar_ignore_sectors_deg": [[33.0, 43.0], [131.0, 141.0], [-145.0, -134.0], [-42.0, -30.0]],
   "control_dt": 0.08333333333333333,
+  "vision_required": false,
+  "vision_status_timeout": 1.0,
+  "pig_stop_clear_seconds": 1.5,
+  "state_publish_period": 0.5,
   "half_length": 0.23,
   "half_width": 0.21,
   "collision_margin": 0.02,
@@ -23,6 +27,6 @@
   "min_branch_run": 2.5,
   "max_branch_run": 6.0,
   "return_takeover": 1.1,
-  "cruise_speed": 0.2,
+  "cruise_speed": 0.4,
   "turn_speed": 0.6
 }

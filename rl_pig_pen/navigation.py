@@ -46,6 +46,10 @@ class Config:
     brake_deceleration: float = 1.5
     control_dt: float = 1.0 / 12.0
     sensor_timeout: float = 3.0  # wall seconds, including a paused simulator
+    vision_required: bool = False  # Require peer heartbeat; stop requests always remain active.
+    vision_status_timeout: float = 1.0  # monotonic receive time, not ROS time
+    pig_stop_clear_seconds: float = 1.5
+    state_publish_period: float = 0.5
     reset_attempts: int = 5
     reset_validation_frames: int = 24
     open_distance: float = 1.5
@@ -88,6 +92,7 @@ def load_config(path=CONFIG_FILE):
     data = json.loads(Path(path).read_text())
     cfg = Config(**data)
     positive = ("half_length", "half_width", "control_dt", "sensor_timeout",
+                "vision_status_timeout", "pig_stop_clear_seconds", "state_publish_period",
                 "open_distance", "wall_distance", "end_distance", "brake_deceleration",
                 "cruise_speed", "turn_speed", "yaw_tolerance", "entry_distance",
                 "entry_handoff_yaw_tolerance", "entry_handoff_wall_offset",
@@ -99,6 +104,8 @@ def load_config(path=CONFIG_FILE):
                 "junction_tracking_max_translation", "junction_geometry_timeout", "turn_kp")
     if any(not math.isfinite(getattr(cfg, key)) or getattr(cfg, key) <= 0 for key in positive):
         raise ValueError("Patrol distances, speeds and times must be finite and positive")
+    if type(cfg.vision_required) is not bool:
+        raise ValueError("vision_required must be a boolean")
     if any(type(getattr(cfg, key)) is not int or getattr(cfg, key) < 1 for key in
            ("junctions", "confirm_frames", "train_max_steps", "patrol_max_steps",
             "reset_attempts", "reset_validation_frames")):

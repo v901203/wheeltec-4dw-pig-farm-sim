@@ -97,6 +97,25 @@ source /opt/ros/humble/setup.bash
 
 控制器會顯示目前狀態、已完成路口及支線端點數。轉彎和路口置中使用 LiDAR 幾何完成判斷；感測中斷或追蹤異常會鎖定停車。詳細流程與測試範圍見 [完整巡邏說明](rl_pig_pen/README.md)。
 
+### 與攝影機／機械手臂協作
+
+完整巡邏新增兩個 ROS topic；豬臉辨識與拍攝方向由對方程式負責，本車只發布路線狀態、接受停車請求。
+
+| Topic | 方向與型別 | 用途 |
+| --- | --- | --- |
+| `/patrol/state` | 本車發布 `std_msgs/msg/String` | 現有 FSM 英文狀態，例如 `MAIN`、`LEFT_OUTBOUND`、`RIGHT_OUTBOUND`；切換時發布，並每 0.5 秒重送 |
+| `/pig_face/stop_requested` | 本車訂閱 `std_msgs/msg/Bool` | 對方持續以 5～10 Hz 發布；`true` 請求停車、`false` 解除請求 |
+
+主幹道／支線直行或倒車時接受拍攝停車；置中、轉彎及進出路口時延後到直線狀態，再依當時請求判斷。停車後保留路線進度；連續收到 `false` 至少 1.5 秒，且新 LiDAR 幾何確認完成後才允許繼續，障礙與雷達保護仍有效。**路段狀態不等於已停穩的回報**，不能拿來授權機械手臂伸入車體移動範圍。
+
+目前暫時停用「等待攝影機／攝影機失聯停車」（`vision_required=false`）：預設直接依路線巡邏，沒有訊息或訊息中斷不會額外觸發停車。**停車指令仍有效**；收到 `true` 後依上述狀態規則停車，之後失聯不會自行解除，仍需持續 `false` 與雷達確認。直接用原本命令啟動即可：
+
+```bash
+/usr/bin/python3 rl_pig_pen/fsm_lidar_patrol.py
+```
+
+日後要恢復攝影機失聯保護，可加 `--ros-args -p vision_required:=true`。此參數現在只控制是否強制要求攝影機心跳，不會關閉停車指令。原本 `fsm_patrol.py` 直行腳本與 UART bridge 不受影響。狀態對照、QoS 與聯調步驟見 [攝影機協作介面](rl_pig_pen/README.md#攝影機協作介面)。
+
 ## 執行環境與建置
 
 現有啟動流程以 Ubuntu 22.04、ROS 2 Humble、Gazebo Ignition Fortress 6 為基礎。執行前應備妥：
@@ -136,6 +155,94 @@ source install/setup.bash
 
 實體 LiDAR 已完成 60 秒靜止量測，共取得 721 幀；依四個車體角柱的固定近距離回波與雷達近距離盲區，巡邏設定排除車體角度 `[33°,43°]`、`[131°,141°]`、`[-145°,-134°]`、`[-42°,-30°]`。原始雷達的 `215°～226°` 與 `318°～330°` 已換算為程式使用的 `-180°～180°` 表示。這些射線不參與近障礙、牆線、路口或行車淨空判斷；總盲區為 43°，安全車身尺寸仍須包含立柱外緣。若改變雷達或立柱安裝位置，必須重新量測，不能直接沿用。
 
+## 鐳神 M10P-PHY 實體連接
+
+本節依專案內的 [《鐳神智能 M10P-PHY 使用者手冊 V1.0.2》](<1. 镭神智能_M10P-PHY_用户手册_V1.0.2_20250311.pdf>) 整理。M10P-PHY 是 360°、12 Hz、20,000 點／秒的乙太網路 LiDAR；它不是 USB 雷達，資料不會出現在 `/dev/ttyUSB*`。實車需分別連接電源與有線網路，再由 ROS 驅動把 UDP 資料轉成 `/scan`。
+
+### 接頭版本與接線
+
+手冊列出兩種出線形式：帶 GPS 的 M12 A-code 8-pin 公頭，以及不帶 GPS 的一分二出線版本。線材可客製，手冊也提醒客製線可能與標準顏色／定義不同；接線前應核對實際線材標籤與供應商資料，不能只看線色猜測。
+
+M12 A-code 8-pin 標準定義如下：
+
+| Pin | 訊號／標準線色 | 用途 |
+| --- | --- | --- |
+| 1 | `VIN`／紅 | 電源正極 |
+| 2 | `TD_P`／白 | 雷達送往外部設備的 Ethernet TX+ |
+| 3 | `TD_N`／綠 | 雷達送往外部設備的 Ethernet TX− |
+| 4 | `RD_P`／棕 | 外部設備送往雷達的 Ethernet RX+ |
+| 5 | `RD_N`／藍 | 外部設備送往雷達的 Ethernet RX− |
+| 6 | `GPS_PPS`／黃 | GPS 秒脈衝；不用 GPS 時保持未連接 |
+| 7 | `GPS_REC`／橙 | GPS 經緯度時間；不用 GPS 時保持未連接 |
+| 8 | `GND`／黑 | 電源負極 |
+| 外殼 | `PE`／屏蔽 | 屏蔽地／機殼地 |
+
+一分二線版本會分成網路 `CN2` 與電源 `CN3`：`CN2` 使用 Ethernet pin 1=`TD_P`、2=`TD_N`、3=`RD_P`、6=`RD_N`；`CN3` 的 `1+` 是 VIN，`2−` 是 GND。使用原廠分線時，實際操作就是把網路端接到 Xavier 的 Ethernet 網口或同一交換器，電源端接到獨立穩壓電源。
+
+### 供電要求
+
+手冊的規格表與電氣參數表標示 `9–32 V`，典型 12 V、典型電流 200 mA、最大工作電流 350 mA，允許的電壓紋波上限為 80 mV；但接頭腳位表另寫 `9–36 V`。兩處上限不一致，因此本專案採較保守的 **9–32 V**，建議先使用穩壓 12 V，未經原廠書面確認不要使用 32 V 以上電源。
+
+- 關閉電源後再插拔 M12、分線或裸線接頭。
+- 不可從 Xavier Ethernet 網口或一般 USB 連接埠直接供電。
+- VIN 與 GND 不可接反，建議在電源正極加入適當保險絲與獨立開關。
+- PE／屏蔽依整車接地設計接至機殼地，避免把屏蔽線誤當成 VIN 或資料線。
+- GPS PPS／REC 不是普通 UART 控制線，不使用時不要接到 Xavier GPIO 或 STM32 UART。
+
+### Xavier 網路設定
+
+手冊標示雷達的出廠預設「目的 IP」為 `192.168.1.102`、UDP 目的埠為 `2368`，因此 Xavier 連接雷達的有線網卡應設成同一目的位址，例如：
+
+```text
+Xavier Ethernet IPv4：192.168.1.102/24
+UDP 接收埠：2368
+```
+
+手冊封包擷取範例顯示資料由 `192.168.1.200:2369` 傳往主機的 `2368`，可把 `192.168.1.200` 當作出廠雷達位址的檢查起點；若設備曾被改過設定，應以實際封包來源與原廠設定工具為準。雷達目的 IP、Xavier IP 與驅動設定必須一致，網路上也不能有另一台設備占用 `192.168.1.102`。第一次修改 IP 後，手冊要求重新啟動雷達電源。
+
+在 Xavier 主機先確認網卡名稱與位址：
+
+```bash
+ip -br link
+ip -br addr
+```
+
+假設雷達網卡是 `eth0`，完成主機的靜態 IP 設定並重新上電後，可依序檢查：
+
+```bash
+ping 192.168.1.200
+sudo tcpdump -ni eth0 udp port 2368
+```
+
+`tcpdump` 能看到持續的 UDP 封包，才表示電源、網線、目的 IP 與網卡基本正常。手冊的 M10 範例封包長度為 92 bytes，但仍應以實際型號與通訊協議為準，不能只靠封包長度判斷所有資料都正確。
+
+### Docker 與 ROS 2 Humble
+
+雷達透過 Ethernet 傳輸，不需要 Docker 的 `--device=/dev/ttyUSB*`；建議讓容器使用主機網路：
+
+```bash
+docker run -it --rm --network host <LiDAR/巡邏映像名稱>
+```
+
+靜態 IP 應在 Xavier 主機的實體網卡上設定。容器使用 `--network host` 後接收主機 `2368/UDP`；若改用 bridge network，還需另外處理 UDP 埠與目的 IP 路由，不建議用於第一次實車測試。
+
+手冊第 6 章提供的是 ROS 1 `catkin_make`、`roslaunch lslidar_driver lslidar_net.launch` 範例，**不能直接當作 ROS 2 Humble 指令使用**。Xavier Docker 必須安裝或移植支援 M10P-PHY 的 ROS 2 驅動，並確認其參數至少符合雷達 IP、主機／目的 IP、UDP 2368 埠、距離上下限及角度裁切。驅動最後必須發布：
+
+```text
+/scan    sensor_msgs/msg/LaserScan
+```
+
+啟動巡邏前檢查：
+
+```bash
+source /opt/ros/humble/setup.bash
+ros2 topic list
+ros2 topic hz /scan
+ros2 topic echo /scan --once
+```
+
+M10P-PHY 規格掃描頻率為 12 Hz，因此 `/scan` 應接近 12 Hz；仍需檢查時間戳是否前進、距離值是否有效、`0°` 是否朝車頭，以及四個角柱是否落在目前設定的忽略區間。確認 `/scan` 穩定後，才啟動 `fsm_lidar_patrol.py`，最後才啟動 UART bridge 讓 `/cmd_vel` 真正送到底盤。
+
 世界與豬隻資源分別位於 `worlds/` 與 `pig_model/`。若專案搬到其他位置，啟動前可用 `PIG_MODEL_PKG_DIR` 指向實際的 `pig_model` 目錄；腳本的預設值是 `$HOME/Desktop/4wd/pig_model`。
 
 ## 目錄與常用工具
@@ -152,7 +259,6 @@ source install/setup.bash
 | [scripts/cmdvel_to_stm32.py](scripts/cmdvel_to_stm32.py) | 實體底盤串口速度轉接，不由模擬入口啟動 |
 | [rl_pig_pen/](rl_pig_pen/README.md) | 獨立直行與巡邏控制、幾何估計、設定及測試 |
 | `turn_on_wheeltec_robot/` | ROS 2 底盤套件、URDF 與模型資源 |
-| `turn_on_wheeltec_robot_ros1_backup/` | ROS 1 備份，不是目前 ROS 2 執行入口 |
 | `src/transport_drivers/` | 傳輸／串口相依套件 |
 | [zed_description/](zed_description/README.md) | ZED 相機描述資源 |
 | `rviz/` | RViz 設定 |

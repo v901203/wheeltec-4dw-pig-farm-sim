@@ -1,6 +1,7 @@
 """Check ROS adapter stop behaviour without creating ROS participants."""
 
 from pathlib import Path
+from dataclasses import replace
 import sys
 from types import SimpleNamespace
 import unittest
@@ -23,9 +24,10 @@ class PatrolNodeTests(unittest.TestCase):
     def setUp(self):
         # Bypass Node.__init__: no DDS participant, serial port or robot output.
         self.node = object.__new__(LidarPatrolNode)
-        self.node.cfg = load_config()
+        self.node.cfg = replace(load_config(), vision_required=False)
         self.node.controller = TraditionalPatrolController(self.node.cfg)
         self.node.pub = Mock()
+        self.node.state_pub = Mock()
         self.node.last_received = None
         self.node.reported = None
         self.node.init_scan_health()

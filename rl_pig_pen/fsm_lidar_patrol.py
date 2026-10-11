@@ -17,13 +17,14 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.clock import Clock, ClockType
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import qos_profile_sensor_data, QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from rclpy.executors import ExternalShutdownException
 from rclpy.signals import SignalHandlerOptions
 from rclpy.utilities import try_shutdown
 from rclpy.impl.implementation_singleton import rclpy_implementation
 from geometry_msgs.msg import Twist
 from sensor_msgs.msg import LaserScan
+from std_msgs.msg import Bool, String
 
 from lidar_patrol_controller import TraditionalPatrolController, incoming_corridor
 from navigation import SensorFault, lidar_ignore_mask, load_config, scan_features
@@ -40,6 +41,59 @@ STATE_LABELS = {
 }
 
 
+class PigStopGate:
+    """Receive-time watchdog for the peer's Bool; no image interpretation."""
+
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.last_received = None
+        self.requested = False
+        self.hold_pending = cfg.vision_required
+        self.clear_since = None
+        self.clear_frames = 0
+
+    def receive(self, stop, now):
+        if (self.last_received is None or
+                now - self.last_received >= self.cfg.vision_status_timeout):
+            self.clear_since = None
+            self.clear_frames = 0
+            if self.cfg.vision_required:
+                self.hold_pending = True
+        self.last_received = now
+        self.requested = bool(stop)
+        if stop:
+            self.hold_pending = True
+            self.clear_since = None
+            self.clear_frames = 0
+        else:
+            if self.clear_since is None:
+                self.clear_since = now
+            self.clear_frames += 1
+
+    def reason(self, now):
+        if self.last_received is None:
+            return "WAITING_PEER" if self.cfg.vision_required else None
+        if now - self.last_received >= self.cfg.vision_status_timeout:
+            self.clear_since = None
+            self.clear_frames = 0
+            if self.cfg.vision_required:
+                self.hold_pending = True
+                return "VISION_TIMEOUT"
+            # Optional peer: silence never creates a new hold, but cannot
+            # cancel a stop that was already requested.
+            if not self.hold_pending:
+                return None
+        if self.requested:
+            return "STOP_REQUESTED"
+        if not self.hold_pending:
+            return None
+        if (self.clear_frames < 2 or self.clear_since is None or
+                now - self.clear_since < self.cfg.pig_stop_clear_seconds):
+            return "WAITING_CLEAR"
+        self.hold_pending = False
+        return None
+
+
 class LidarPatrolNode(Node):
     WATCHDOG_PERIOD = .1
     MAX_RECEIVE_PAUSE = .4
@@ -48,18 +102,39 @@ class LidarPatrolNode(Node):
     def __init__(self):
         super().__init__("pig_pen_lidar_patrol")
         self.cfg = load_config()
+        # Startup-only switch for mandatory peer heartbeat. Explicit stop
+        # requests remain active even when the heartbeat is optional.
+        required = self.declare_parameter("vision_required", self.cfg.vision_required).value
+        if type(required) is not bool:
+            raise ValueError("vision_required must be boolean")
+        self.cfg = replace(self.cfg, vision_required=required)
         self.controller = TraditionalPatrolController(self.cfg)
         self.last_received = None
         self.reported = None
         self.init_scan_health()
         self.pub = self.create_publisher(Twist, "/cmd_vel", 10)
+        self.state_pub = self.create_publisher(String, "/patrol/state", QoSProfile(
+            depth=1, reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        self.pig_stop_sub = self.create_subscription(
+            Bool, "/pig_face/stop_requested", self.on_pig_stop, QoSProfile(
+                depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.VOLATILE))
         self.sub = self.create_subscription(LaserScan, "/scan", self.on_scan,
                                             qos_profile_sensor_data)
         self.watchdog = self.create_timer(self.WATCHDOG_PERIOD, self.check_scan,
                                          clock=Clock(clock_type=ClockType.STEADY_TIME))
+        self.state_timer = self.create_timer(self.cfg.state_publish_period, self.publish_state,
+                                            clock=Clock(clock_type=ClockType.STEADY_TIME))
+        self.publish_state()
+        self.publish((0., 0.))
         self.get_logger().info("LiDAR 巡邏啟動：左支線前進、倒退至右端、返回主幹道")
 
     def init_scan_health(self):
+        self.pig_stop_gate = PigStopGate(self.cfg)
+        self.reported_pig_stop = None
+        if self.cfg.vision_required:
+            self.controller.pause_external()
         self.scan_hold_since = None
         self.scan_hold_reason = None
         self.recovery_frames = 0
@@ -77,6 +152,40 @@ class LidarPatrolNode(Node):
         # keeping the old 1/12 s assumption when increasing the receive budget.
         self.controller.cfg = replace(self.controller.cfg, control_dt=max(
             self.cfg.control_dt, self.MAX_RECEIVE_PAUSE + self.WATCHDOG_PERIOD))
+
+    def publish_state(self):
+        self.state_pub.publish(String(data=self.controller.state))
+
+    def sync_pig_stop(self, now):
+        reason = self.pig_stop_gate.reason(now)
+        # Routine photography requests wait for a straight-road state. Loss
+        # of the peer is a separate fail-safe and stops in EVERY route state.
+        deferred = (reason in ("STOP_REQUESTED", "WAITING_CLEAR") and
+                    not self.controller.external_paused and
+                    self.controller.state not in self.controller.CORRIDOR_STATES)
+        if reason is not None and not deferred:
+            self.controller.pause_external()
+        status = ("DEFERRED" if deferred else reason) or (
+            "RELOCALIZING" if self.controller.external_paused else None)
+        if status != self.reported_pig_stop:
+            if deferred:
+                self.get_logger().info(
+                    f"拍攝停車請求延後：目前 {self.controller.state}；交接後再判斷最新請求")
+            elif status:
+                self.get_logger().warning(
+                    f"外部停車：{status}；保留路線狀態：{self.controller.state}")
+            else:
+                self.get_logger().info("外部停車解除；後續動作仍由 LiDAR 與障礙保護判斷")
+            self.reported_pig_stop = status
+        return reason
+
+    def on_pig_stop(self, message):
+        now = time.monotonic()
+        self.pig_stop_gate.receive(message.data, now)
+        self.sync_pig_stop(now)
+        if self.controller.external_paused:
+            # An accepted stop cancels both translation and rotation.
+            self.publish((0., 0.))
 
     def record_scan_timing(self, now, stamp):
         """Learn only from fresh, valid scan pairs; never from timer ticks.
@@ -134,6 +243,7 @@ class LidarPatrolNode(Node):
         # A timer observing the same receive gap is not another bad scan.
         # Actual invalid/duplicate scans still break consecutive confirmation.
         if invalidates_progress:
+            self.controller.external_resume_frames = 0
             self.recovery_frames = 0
             self.controller.confirm = 0
             self.last_valid_receive = self.last_valid_stamp = None
@@ -167,15 +277,20 @@ class LidarPatrolNode(Node):
         return None
 
     def publish(self, command):
+        self.sync_pig_stop(time.monotonic())
+        if (self.controller.external_paused or self.scan_hold_since is not None or
+                self.controller.state in self.controller.TERMINAL):
+            command = (0., 0.)
         msg = Twist()
         msg.linear.x, msg.angular.z = map(float, command)
         self.pub.publish(msg)
         # Preserve the last moving command during a sensor pause so genuine
         # obstacles inside its stopping envelope still trigger protection.
-        if self.scan_hold_since is None:
+        if self.scan_hold_since is None and not self.controller.external_paused:
             self.last_command = tuple(command)
         status = (self.controller.state, self.controller.failure)
         if status != self.reported:
+            self.publish_state()
             self.get_logger().info(
                 f"{STATE_LABELS[status[0]]} ({status[0]})，"
                 f"已完成路口：{self.controller.junctions_done}，"
@@ -218,6 +333,7 @@ class LidarPatrolNode(Node):
 
     def on_scan(self, scan):
         now = time.monotonic()
+        pig_reason = self.sync_pig_stop(now)
         self.last_receive_interval = None if self.last_received is None else now - self.last_received
         # Stop at the adaptive threshold, but allow the same bounded recovery
         # window used for other sensor faults. A late packet cannot erase the
@@ -256,7 +372,24 @@ class LidarPatrolNode(Node):
                         raise SensorFault("Invalid LiDAR return (including isolated rays)")
                     features = scan_features(scan, self.cfg)
                     self.record_scan_timing(now, stamp)
-                    if self.scan_hold_since is None:
+                    if self.controller.external_paused:
+                        # Do not run trial FSM commands while the peer has us
+                        # stopped: that could advance route/endpoint counters.
+                        if (self.scan_hold_since is not None and
+                                now - self.scan_hold_since >= self.cfg.sensor_timeout):
+                            command = self.scan_health_failure(self.scan_hold_failure_reason(), now)
+                        else:
+                            command = self.controller.hold_external(
+                                features, stamp,
+                                release=pig_reason is None and self.scan_hold_since is None)
+                            if self.scan_hold_since is not None:
+                                localized = self.controller.diagnostics.get("external_localized", False)
+                                self.recovery_frames = self.recovery_frames + 1 if localized else 0
+                                if self.recovery_frames >= self.cfg.confirm_frames:
+                                    self.scan_hold_since = self.scan_hold_reason = None
+                                    self.recovery_frames = 0
+                                    self.get_logger().info("LiDAR 已恢復；外部停車仍需獨立解除")
+                    elif self.scan_hold_since is None:
                         command = self.controller.command(features, stamp)
                     elif now - self.scan_hold_since >= self.cfg.sensor_timeout:
                         command = self.scan_health_failure(self.scan_hold_failure_reason(), now)
@@ -316,6 +449,9 @@ class LidarPatrolNode(Node):
 
     def check_scan(self):
         now = time.monotonic()
+        self.sync_pig_stop(now)
+        if self.controller.external_paused:
+            self.publish((0., 0.))
         if self.last_received is None:
             self.publish((0.0, 0.0))
         elif (self.scan_hold_since is not None and

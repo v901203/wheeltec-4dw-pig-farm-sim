@@ -1,6 +1,7 @@
 """LiDAR-only traditional patrol. No ROS, odometry or timed manoeuvres."""
 
 import math
+from copy import deepcopy
 from dataclasses import replace
 
 import numpy as np
@@ -91,6 +92,88 @@ class TraditionalPatrolController:
         self.entry_phase = "JUNCTION"
         self.relocalization = None
         self.relocalization_attempts = 0
+        self.external_paused = False
+        self.external_resume_frames = 0
+
+    def pause_external(self):
+        """Latch a stationary hold without changing route state or counters."""
+        self.external_paused = True
+        self.external_resume_frames = 0
+        self.confirm = self.centre_limit_confirm = 0
+        if self.relocalization is not None:
+            self.relocalization.update(frames=0, candidate=None)
+        if self.obstacle is not None:
+            if self.obstacle["phase"] == "RETREAT":
+                self.obstacle["attempted"] = True
+            self.obstacle.update(phase="WAIT", reason="external_pause",
+                                 clear_frames=0, ready_frames=0, end_frames=0)
+
+    def hold_external(self, features, stamp, *, release=False):
+        """Consume fresh scans while stationary; resume only on current geometry.
+
+        Preserve the acquired junction's identity and directed incoming axis,
+        including halfway through a turn. Never use corridor walls to skip an
+        unfinished entry depth. Obstacle and existing fault recovery remain
+        latched and are handled normally on the NEXT scan after release.
+        """
+        if self.state in self.TERMINAL:
+            return np.zeros(2)
+        if not math.isfinite(stamp):
+            return self.fail("invalid_scan_stamp")
+        if self.last_stamp is not None and stamp < self.last_stamp:
+            return self.fail("scan_time_reversed")
+        if stamp == self.last_stamp:
+            self.external_resume_frames = 0
+            return np.zeros(2)
+        gap = None if self.last_stamp is None else stamp - self.last_stamp
+        if self.state_stamp is None:
+            self.state_stamp = stamp
+        elif gap is not None:
+            self.state_stamp += gap
+        self.last_stamp = stamp
+        self.confirm = self.centre_limit_confirm = 0
+        self.diagnostics.update(external_pause=True, external_localized=False)
+        if gap is not None and gap > self.cfg.junction_tracking_max_gap:
+            self.external_resume_frames = 0
+        if safe_command([0., 0.], features, self.cfg, allow_reverse=True)[1]:
+            self.external_resume_frames = 0
+            return self.stop_for_obstacle([0., 0.], features)
+
+        corridor_mode = (self.state in self.CORRIDOR_STATES or
+                         (self.state in self.ENTRY_STATES and self.entry_phase == "WALL_CONFIRM"))
+        localized = False
+        if corridor_mode:
+            corridor = incoming_corridor(features, self.cfg)
+            localized = corridor is not None
+            if self.state in self.ENTRY_STATES:
+                localized = self._entry_wall_ready(features, corridor)
+        elif self.tracker is not None:
+            # Update a copy so a rejected measurement cannot overwrite the
+            # last accepted axes/centre. Rebase TIME only after a stationary
+            # pause; position and rotation limits still apply to the old pose.
+            candidate = deepcopy(self.tracker)
+            candidate.stamp = stamp - min(self.cfg.control_dt, .1)
+            geometry = self._geometry(features)
+            if geometry is not None:
+                localized = candidate.update(geometry, stamp)
+                if not localized:
+                    fallback = self.tracker.observe_walls(features)
+                    localized = fallback is not None and candidate.update(fallback, stamp)
+                if localized:
+                    self.tracker = candidate
+        self.external_resume_frames = (
+            self.external_resume_frames + 1 if release and localized else 0)
+        self.diagnostics.update(external_pause=True, external_localized=bool(localized),
+                                external_resume_frames=self.external_resume_frames)
+        if self.external_resume_frames >= self.cfg.confirm_frames:
+            self.external_paused = False
+            self.external_resume_frames = 0
+            # Straight-road acquisition before the pause is no longer a
+            # consecutive route confirmation. Acquire afresh on the next scan.
+            if corridor_mode:
+                self.tracker = None
+            self.diagnostics["external_pause"] = False
+        return np.zeros(2)
 
     def fail(self, reason):
         if reason in self.RELOCALIZATION_REASONS and self.state not in self.TERMINAL:
@@ -579,6 +662,8 @@ class TraditionalPatrolController:
         return command
 
     def command(self, features, stamp, *, allow_retreat=True):
+        if self.external_paused:
+            return self.hold_external(features, stamp)
         if self.state in self.TERMINAL:
             return np.zeros(2)
         if not math.isfinite(stamp):
