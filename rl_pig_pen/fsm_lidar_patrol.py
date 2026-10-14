@@ -158,19 +158,23 @@ class LidarPatrolNode(Node):
 
     def sync_pig_stop(self, now):
         reason = self.pig_stop_gate.reason(now)
-        # Routine photography requests wait for a straight-road state. Loss
-        # of the peer is a separate fail-safe and stops in EVERY route state.
+        # Junction acquisition can already be active before the public route
+        # state leaves MAIN/REVERSE_LEFT/RETURN_RIGHT. Defer photo holds there
+        # too. The optional peer-loss fail-safe still stops in EVERY state.
         deferred = (reason in ("STOP_REQUESTED", "WAITING_CLEAR") and
                     not self.controller.external_paused and
-                    self.controller.state not in self.controller.CORRIDOR_STATES)
+                    not self.controller.can_accept_external_stop())
         if reason is not None and not deferred:
             self.controller.pause_external()
         status = ("DEFERRED" if deferred else reason) or (
             "RELOCALIZING" if self.controller.external_paused else None)
         if status != self.reported_pig_stop:
             if deferred:
+                phase = ("路口接近確認" if self.controller.state in
+                         self.controller.JUNCTION_APPROACH_STATES else "路口交接")
                 self.get_logger().info(
-                    f"拍攝停車請求延後：目前 {self.controller.state}；交接後再判斷最新請求")
+                    f"拍攝停車請求延後：目前 {self.controller.state}（{phase}）；"
+                    "交接後再判斷最新請求")
             elif status:
                 self.get_logger().warning(
                     f"外部停車：{status}；保留路線狀態：{self.controller.state}")

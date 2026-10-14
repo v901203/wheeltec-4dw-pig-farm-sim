@@ -257,6 +257,83 @@ class PeerNodeTests(unittest.TestCase):
             self.node.publish((.2, .1))
         self.assert_stopped()
 
+    def test_junction_acquisition_defers_photo_without_freezing_confirmation(self):
+        for state, target, sign in (("MAIN", "CENTER", 1),
+                                    ("REVERSE_LEFT", "CROSS_REVERSE", -1),
+                                    ("RETURN_RIGHT", "RETURN_CENTER", 1)):
+            with self.subTest(state=state):
+                self.setUp()
+                ctrl = self.node.controller
+                ctrl.state = state
+                geometry = JunctionGeometry(np.array([sign * .6, 0.]),
+                                            (0., math.pi / 2), 1., (1.25, 1.04))
+                with patch.object(ctrl, "_geometry", return_value=geometry):
+                    self.scan_at(1.)
+                    self.assertEqual(ctrl.state, state)
+                    self.assertIsNotNone(ctrl.tracker)
+                    self.assertEqual(ctrl.confirm, 1)
+                    self.request(True, 1.01)
+                    self.assertFalse(ctrl.external_paused)
+                    self.assertEqual(ctrl.confirm, 1)
+                    self.assertEqual(self.node.reported_pig_stop, "DEFERRED")
+                    self.node.publish_state()
+                    self.assertEqual(self.node.state_pub.publish.call_args.args[0].data, state)
+                    self.scan_at(1.1)
+                    self.scan_at(1.2)
+                self.assertEqual(ctrl.state, target)
+                self.assertFalse(ctrl.external_paused)
+                self.assertEqual((ctrl.junctions_done, ctrl.endpoints_reached), (0, 0))
+
+    def test_pending_photo_is_accepted_only_after_wall_handoff(self):
+        for entry, target in (("ENTRY_LEFT", "LEFT_OUTBOUND"),
+                              ("CROSS_REVERSE", "RIGHT_OUTBOUND"),
+                              ("EXIT_MAIN", "MAIN")):
+            with self.subTest(entry=entry):
+                self.setUp()
+                # Leave clearance behind the car for reverse wall handoff;
+                # the spawn pose is close to the main-road rear wall.
+                self.scan = StaticLidarScene().scan((0., -10.3, math.pi / 2))
+                ctrl = self.node.controller
+                ctrl.state = entry
+                ctrl.entry_phase = "WALL_CONFIRM"
+                self.request(True, 1.)
+                for stamp in (1., 1.1):
+                    self.scan_at(stamp)
+                    self.assertEqual(ctrl.state, entry)
+                    self.assertFalse(ctrl.external_paused)
+                self.scan_at(1.2)
+                self.assertEqual(ctrl.state, target)
+                self.assertTrue(ctrl.external_paused)
+                self.assert_stopped()
+
+    def test_cancelled_approach_request_does_not_stop_on_later_straight_road(self):
+        ctrl = self.node.controller
+        ctrl.tracker = JunctionTracker(JunctionGeometry(np.array([.6, 0.]),
+                                      (0., math.pi / 2), 1.), 1., ctrl.cfg)
+        self.request(True, 1.)
+        self.assertFalse(ctrl.external_paused)
+        for i in range(17):
+            self.request(False, 1.1 + i / 10)
+        ctrl._transition("LEFT_OUTBOUND", 2.8, clear_tracker=True)
+        self.scan_at(2.8)
+        self.assertFalse(ctrl.external_paused)
+        self.assertGreater(self.node.pub.publish.call_args.args[0].linear.x, 0)
+
+    def test_peer_timeout_overrides_junction_approach_deferral(self):
+        self.node.cfg = replace(self.node.cfg, vision_required=True)
+        self.node.init_scan_health()
+        ctrl = self.node.controller
+        ctrl.external_paused = False
+        ctrl.tracker = JunctionTracker(JunctionGeometry(np.array([.6, 0.]),
+                                      (0., math.pi / 2), 1.), 1., ctrl.cfg)
+        self.request(True, 1.)
+        self.assertFalse(ctrl.external_paused)
+        self.node.last_received = 2.1
+        with patch("fsm_lidar_patrol.time.monotonic", return_value=2.1):
+            self.node.check_scan()
+        self.assertTrue(ctrl.external_paused)
+        self.assert_stopped()
+
     def test_peer_timeout_stops_even_during_turn(self):
         self.node.cfg = replace(self.node.cfg, vision_required=True)
         self.node.init_scan_health()

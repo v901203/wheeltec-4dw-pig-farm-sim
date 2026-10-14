@@ -59,6 +59,7 @@ class TraditionalPatrolController:
     RETREAT_STATES = ("CENTER", "RETURN_CENTER", "ENTRY_LEFT", "CROSS_REVERSE", "EXIT_MAIN")
     CORRIDOR_STATES = ("MAIN", "FINAL_MAIN", "LEFT_OUTBOUND", "REVERSE_LEFT",
                        "RIGHT_OUTBOUND", "RETURN_RIGHT")
+    JUNCTION_APPROACH_STATES = ("MAIN", "REVERSE_LEFT", "RETURN_RIGHT")
     ENTRY_STATES = ("ENTRY_LEFT", "CROSS_REVERSE", "EXIT_MAIN")
     # These failures describe a lost or inconsistent local pose, not a proven
     # collision.  Hold position and reacquire current geometry before deciding
@@ -94,6 +95,16 @@ class TraditionalPatrolController:
         self.relocalization_attempts = 0
         self.external_paused = False
         self.external_resume_frames = 0
+
+    def can_accept_external_stop(self):
+        """Accept photography holds only outside junction acquisition/motion.
+
+        A first valid junction scan creates a tracker while the public route
+        state still names the straight road. Its confirmation frames already
+        belong to the junction manoeuvre and must not be frozen by a photo hold.
+        """
+        return (self.state in self.CORRIDOR_STATES and
+                not (self.state in self.JUNCTION_APPROACH_STATES and self.tracker is not None))
 
     def pause_external(self):
         """Latch a stationary hold without changing route state or counters."""
@@ -536,7 +547,7 @@ class TraditionalPatrolController:
             if geometry is not None:
                 self.diagnostics["geometry_source"] = "four_openings"
                 return geometry
-        if self.tracker is not None and self.state not in ("MAIN", "REVERSE_LEFT", "RETURN_RIGHT"):
+        if self.tracker is not None and self.state not in self.JUNCTION_APPROACH_STATES:
             geometry = self.tracker.observe_walls(features)
             if geometry is not None:
                 self.diagnostics["geometry_source"] = "tracked_walls"
@@ -723,7 +734,7 @@ class TraditionalPatrolController:
                         return self._transition(next_state, stamp, clear_tracker=True)
                     return np.zeros(2)
                 self.confirm = 0 if self.tracker is None else self.confirm
-            if self.state in ("MAIN", "REVERSE_LEFT", "RETURN_RIGHT"):
+            if self.state in self.JUNCTION_APPROACH_STATES:
                 target = {"MAIN": "CENTER", "REVERSE_LEFT": "CROSS_REVERSE",
                           "RETURN_RIGHT": "RETURN_CENTER"}[self.state]
                 acquired = self._acquire(self._geometry(features), stamp, sign, target)
