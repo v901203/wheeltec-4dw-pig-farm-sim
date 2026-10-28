@@ -37,8 +37,10 @@ class Config:
     lidar_yaw: float = 0.0  # laser_link is at base x=y=0 in the supplied URDF
     # Body-frame angles hidden by the four physical corner posts. Each pair is
     # [low_deg, high_deg]; 0 is forward and positive angles point left.
-    lidar_ignore_sectors_deg: tuple = ((33.0, 43.0), (131.0, 141.0),
-                                       (-145.0, -134.0), (-42.0, -30.0))
+    # Provisional 15-degree sectors centred on the original post estimates.
+    # Total width reaches the 60-degree cap; real-robot calibration is required.
+    lidar_ignore_sectors_deg: tuple = ((30.5, 45.5), (128.5, 143.5),
+                                       (-147.0, -132.0), (-43.5, -28.5))
     half_length: float = 0.23  # includes wheels
     half_width: float = 0.21
     collision_margin: float = 0.02

@@ -148,7 +148,7 @@ linear_x = clip(cruise_speed, 0, MAX_LIN)
 | 巡航速度 `cruise_speed` | 0.2 m/s | [patrol_config.json](patrol_config.json) |
 | 控制週期 `control_dt` | 1/12 秒，約 12 Hz | `patrol_config.json` |
 | LiDAR 安裝偏角 `lidar_yaw` | 0 rad | `patrol_config.json` |
-| 車體立柱排除角度 `lidar_ignore_sectors_deg` | `[33°,43°]`、`[131°,141°]`、`[-145°,-134°]`、`[-42°,-30°]` | `patrol_config.json` |
+| 車體立柱排除角度 `lidar_ignore_sectors_deg` | `[30.5°,45.5°]`、`[128.5°,143.5°]`、`[-147°,-132°]`、`[-43.5°,-28.5°]`（每段 15°） | `patrol_config.json` |
 | 平行修正增益 `kp_heading` | 1.4 | `fsm_patrol.py` |
 | 置中修正增益 `kp_center` | 1.0 | `fsm_patrol.py` |
 | 直行時角速度上限 | ±0.3 rad/s | `fsm_patrol.py`，另受 `MAX_ANG` 限制 |
@@ -157,7 +157,15 @@ linear_x = clip(cruise_speed, 0, MAX_LIN)
 
 設定檔固定從 `navigation.py` 同目錄的 `patrol_config.json` 載入；目前入口沒有自訂 `--config` 參數。修改後需重啟控制器。
 
-`lidar_ignore_sectors_deg` 使用修正 `lidar_yaw` 後的車體角度，`0°` 是車頭、正角度朝左。實體雷達靜止量測 60 秒取得 721 幀及 5923 個 10～25 cm 近距離回波；考慮角柱邊緣回波與低於最小測距時的無回波區，設定四段為 `[33,43]`、`[131,141]`、`[-145,-134]`、`[-42,-30]`，總排除寬度 43°。其中原始 `0°～360°` 表示的 `215°～226°`、`318°～330°` 分別換算為 `-145°～-134°`、`-42°～-30°`。
+`lidar_ignore_sectors_deg` 使用修正 `lidar_yaw` 後的車體角度，`0°` 是車頭、正角度朝左。實體雷達靜止量測 60 秒取得 721 幀及 5923 個 10～25 cm 近距離回波；原本依使用者估計設為 `[33,43]`、`[131,141]`、`[-145,-134]`、`[-42,-30]`，總排除寬度 43°，後曾增加至 51°。目前依使用者要求保留各段中心、每段調整為 15°：`[30.5,45.5]`、`[128.5,143.5]`、`[-147,-132]`、`[-43.5,-28.5]`，合計 60°，已達原有設定上限。換成 `0°～360°` 是 `30.5°～45.5°`、`128.5°～143.5°`、`213°～228°`、`316.5°～331.5°`。這是待實車驗證的設定，不是重新量測的結果，也尚未證實障礙一定來自角柱。
+
+本次未修改煞停距離、車體碰撞範圍、旋轉／弧形淨空、牆線信心度或路口確認門檻。遮罩未涵蓋正前方 `±15°`、後方 `±150°～180°`、左右側 `60°～120°`／`-120°～-60°` 的主要量測區域；但幾何擬合仍會少掉部分斜向點，不能保證所有實體場景的辨識效果不變。保留原有總遮罩不超過 60° 的設定檢查；此上限不代表小於 60° 就一定安全。
+
+更新板子上的 `patrol_config.json` 與 `navigation.py` 後，先確定車子停止，再重啟控制器讀入設定。空曠靜止量測時檢查「障礙診斷」的 `clearance_hits.angle_deg` 與 `range_m`：只有落在固定角柱邊緣的近點才支持此調整；若觸發角度接近 `0°` 或落在新遮罩以外，先確認安裝朝向、前方物體與原始雷達，不要繼續放大遮罩。實車落地前要在可見方向放置測試障礙、確認仍會停止；盲區內的障礙無法靠此雷達保證偵測，須保留急停與現場監護。
+
+2026-10-15 每段 15°（總計 60°）驗證：角柱遮罩與路口追蹤共 14 項測試通過，涵蓋新邊界排除及遮罩外障礙保護；未重跑完整路線、Gazebo 或實車。
+
+先前 51° 遮罩驗證：[角柱遮罩測試](tests/test_lidar_self_mask.py) 8 項通過，含新邊緣排除、車體座標偏角、遮罩外障礙、前後行車保護與原始雷達安全層的一致性；連同路口追蹤及攝影機協作共 44 項通過。另以合成 LiDAR／理想運動模型完成三路口、六端點至主幹道終點 `DONE`。障礙恢復測試 22 項中 21 項通過，1 項的 3 個子案例仍預期定位異常直接失敗，與現有重新定位行為不符；切回原 43° 遮罩可重現相同失敗，未改這些舊斷言。此紀錄不代表目前 60° 遮罩已完成全路線或實車驗證。
 
 排除會同時套用於原始近障礙保護、牆線擬合、路口辨識與行車淨空，避免同一射線在不同層得到矛盾結果。這四段是永久盲區，真實障礙物若完全位於其中也不會被該 LiDAR 看見，因此不得任意擴大；車身尺寸與 `collision_margin` 仍須涵蓋柱子最外緣。改變雷達位置、朝向或角柱結構後，必須重新進行空曠環境靜止量測並更新區間。
 
@@ -381,3 +389,207 @@ Gazebo 真實位置與地圖可用於訓練標籤、獎勵及評估；部署模�
 暫定題目：**基於 LiDAR 與狀態機之窄走道巡邏機器人：結合殘差強化學習的路口操作控制**。
 
 預期研究重點是：在不依賴底盤里程計與 IMU 的條件下，驗證受限學習修正能否改善路口操作，並以完整巡邏、跨場景測試、消融實驗及部署量測說明效果與失敗邊界。這些是待驗證的研究目標，不是既有成果；正式題目及創新性仍需透過更完整的文獻回顧與指導教授討論確認。
+# 可選的三模式控制：巡邏／手控／停止
+
+新增 `control_modes.py`，沿用現有巡邏控制器與安全距離檢查，但只有此節點發布最終
+`/cmd_vel`。不包含網頁。原本 `fsm_lidar_patrol.py`、直線腳本與 `start-patrol` 的啟動
+行為保留；不要同時執行舊巡邏與新入口，也不要讓操作端直接發布到底盤 `/cmd_vel`。
+
+| 模式 | 行為 |
+| --- | --- |
+| `STOP` | 啟動預設；持續送零速度，保留未被手控接管的任務進度 |
+| `AUTO` | 現有 LiDAR 狀態機巡邏，保留拍攝停車、障礙與雷達保護 |
+| `MANUAL` | 只接收 `/manual/cmd_vel`；保留雷達淨空檢查，不自動退避 |
+
+每次有效的模式切換先送零速度。STOP 是軟體保持停止，不是實體急停或已停穩回授。
+無有效雷達不可進入移動模式；手控下雷達過期、無效速度、障礙或外部停車會切成 STOP，
+不會在障礙移開後自行恢復手控。手控首次指令須於切入後 0.5 秒內抵達，後續逾時也會
+進入 STOP；重複要求 MANUAL 不會延長期限。非 MANUAL 時收到的速度不排隊。
+
+手控預設限速為 0.10 m/s、0.30 rad/s；新入口的總輸出上限為 0.20 m/s、0.60 rad/s。
+可用啟動參數 `manual_max_linear`、`manual_max_angular`、`max_linear`、`max_angular`、
+`manual_timeout` 調整（有限正值）。UART bridge 的自身上限仍然有效。
+新節點與舊節點名稱均為 `/pig_pen_lidar_patrol`，同時只能選一個入口。
+
+## 啟動方式
+
+Xavier：將新版 `rl_pig_pen` 與 `scripts/start_robot.sh` 搬到現有掛載位置後，在主機執行：
+
+```bash
+# 先停止原有自動巡邏服務／手動啟動的控制程序
+sudo systemctl stop pig-pen-patrol.service
+bash /home/yu/ros2_ws/start_robot.sh stop
+bash /home/yu/ros2_ws/start_robot.sh start-modes
+```
+
+這會啟動雷達、UART bridge 與三模式節點，預設 STOP。既有 systemd 的 `start-patrol`
+不會自動改成新模式；若要開機進入三模式 STOP，需另將該服務的 ExecStart 最後參數
+改成 `start-modes` 並執行 `systemctl daemon-reload`。
+
+Gazebo 已啟動、沒有其他控制節點時，可在已載入 ROS 2 環境的專案根目錄直接執行：
+
+```bash
+/usr/bin/python3 rl_pig_pen/control_modes.py
+```
+
+## ROS 2 操作介面
+
+使用 ROS 2 既有訊息／服務型別，不需要建立自訂介面套件；環境需有 `std_srvs` 與
+`rcl_interfaces`。Xavier 的以下 ROS 指令均在 `robot-dev` 容器內、source Humble 與
+workspace 的 setup 後執行。
+
+Gazebo 測試：每個操作終端執行 `source /opt/ros/humble/setup.bash` 即可，
+不需要 Docker 或 UART bridge。必須先啟動 `control_modes.py`，且只能有一個控制節點；
+舊的 `fsm_lidar_patrol.py` 沒有提供模式切換服務。結束程式使用 Ctrl-C，
+不要以 Ctrl-Z 暫停後再重開另一份。
+
+Xavier：每個操作終端先執行：
+
+```bash
+docker exec -it robot-dev bash
+source /opt/ros/humble/install/setup.bash
+source /workspace/install/local_setup.bash
+```
+
+| 名稱 | 型別 | 規格 |
+| --- | --- | --- |
+| `/control/set_mode` | `rcl_interfaces/srv/SetParametersAtomically` | 僅接受一個名為 `mode` 的字串參數（type=4），值必須為 AUTO、MANUAL 或 STOP；檢查回覆 `result.successful` 與 `result.reason` |
+| `/manual/cmd_vel` | `geometry_msgs/msg/Twist` | linear.x 與 angular.z 有效；其他四軸須為零，拒絕 NaN/Inf；可靠、volatile、depth=1，建議 20 Hz |
+| `/control/status` | `std_msgs/msg/String`，JSON | 可靠、transient-local、depth=1；定期回報模式、原因、路線狀態與已下達速度 |
+| `/control/reset_at_start` | `std_srvs/srv/Trigger` | 操作者確認已回到巡邏起點並朝正確方向，重設任務；仍停在 STOP |
+| `/patrol/state` | `std_msgs/msg/String` | 保留原本路線狀態名稱；STOP／手控時可能是先前路段，不代表最新實際所在位置 |
+
+停止（可打斷路口轉彎，不受拍攝停車延後規則限制）：
+
+```bash
+ros2 service call /control/set_mode rcl_interfaces/srv/SetParametersAtomically \
+  "{parameters: [{name: mode, value: {type: 4, string_value: STOP}}]}"
+```
+
+開始／恢復巡邏（只有接受請求後才進入 AUTO；仍需連續有效幾何才能移動）：
+
+```bash
+ros2 service call /control/set_mode rcl_interfaces/srv/SetParametersAtomically \
+  "{parameters: [{name: mode, value: {type: 4, string_value: AUTO}}]}"
+```
+
+手控：操作程式應先建立 publisher，成功切換後立即以 20 Hz 發送指令。命令列操作可先在
+終端 A 啟動以下發布器（此為真實移動指令，請先確認場地）；非 MANUAL 時不執行：
+
+```bash
+ros2 topic pub -r 20 /manual/cmd_vel geometry_msgs/msg/Twist \
+  "{linear: {x: 0.05}, angular: {z: 0.0}}"
+```
+
+終端 B 切換模式後會開始移動：
+
+```bash
+ros2 service call /control/set_mode rcl_interfaces/srv/SetParametersAtomically \
+  "{parameters: [{name: mode, value: {type: 4, string_value: MANUAL}}]}"
+```
+
+停止持續發布後，最晚約 0.5 秒加一次 watchdog 週期（0.1 秒）送零速度並切入 STOP。
+放開按鈕時應立即發零速度，不能只依賴逾時；之後重新切 MANUAL 前，先取消舊的非零
+發布器。切成 STOP 不會替外部操作程式結束發布程序。
+
+## 巡邏途中切換手控：條件與操作順序
+
+在新三模式入口下，可以從 AUTO 直接請求 MANUAL，包括置中、轉彎與進出路口期間。
+這是操作者接管，不沿用拍攝停車「等到合適路段才停」的延後規則。
+系統先下達零速度，再檢查是否接受交接；不是已量測到車身停穩的保證。
+
+- 雷達必須有效且新鮮，車體安全範圍必須淨空。
+- 已進入 DONE／FAILED 時不能直接切手控，不能用切模式繞過鎖定故障。
+- 有效的切換請求若因上述條件遭拒，會保持 STOP，不繼續原本巡邏；格式錯誤的請求
+  則直接拒絕，不改模式。
+- 手控仍有安全檢查：雷達異常、危險移動方向或外部停車要求可能使其回到 STOP。
+- 預設 0.5 秒指令逾時，因此不要只切 MANUAL 後慢慢輸入速度指令。
+  `MANUAL: WAITING_MANUAL_COMMAND` 只代表接受切換，不代表車子已開始移動。
+- 同一時間只使用一個手控速度發布器。不要直接發到最終 `/cmd_vel`，以免繞過模式管理。
+
+實際操作順序：
+
+1. 終端 A 準備持續的手控指令。AUTO 期間這個 topic 不會接管，但原本巡邏仍會繼續；
+   若需要先保持停止，可先呼叫 STOP。
+
+   ```bash
+   ros2 topic pub -r 20 /manual/cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.05}, angular: {z: 0.0}}"
+   ```
+
+2. 終端 B 請求切換，檢查回覆的 `successful` 與 `reason`。成功後上述非零指令會開始生效。
+
+   ```bash
+   ros2 service call /control/set_mode rcl_interfaces/srv/SetParametersAtomically "{parameters: [{name: mode, value: {type: 4, string_value: MANUAL}}]}"
+   ```
+
+3. 查看狀態；MANUAL_COMMAND 表示正在處理手控，MANUAL_TIMEOUT 表示已逾時停止。
+
+   ```bash
+   ros2 topic echo /control/status --field data --full-length
+   ```
+
+4. 結束操作先呼叫 STOP，再於終端 A 按 Ctrl-C 取消持續發布。
+
+   ```bash
+   ros2 service call /control/set_mode rcl_interfaces/srv/SetParametersAtomically "{parameters: [{name: mode, value: {type: 4, string_value: STOP}}]}"
+   ```
+
+只在狀態觀看終端按 Ctrl-C，不會停止車子。命令列多行指令的反斜線 `\` 後不可有空白；
+以上單行範例可以直接複製。
+
+### 手控動作對照
+
+手控可連續調整 linear.x 與 angular.z，並非只限定幾個動作。以下是低速操作範例：
+
+| 動作 | linear.x（m/s） | angular.z（rad/s） |
+| --- | ---: | ---: |
+| 前進 | 0.05 | 0.0 |
+| 後退 | -0.05 | 0.0 |
+| 原地左轉 | 0.0 | 0.15 |
+| 原地右轉 | 0.0 | -0.15 |
+| 前進左轉 | 0.05 | 0.15 |
+| 前進右轉 | 0.05 | -0.15 |
+| 倒退時車頭向左轉 | -0.05 | 0.15 |
+| 倒退時車頭向右轉 | -0.05 | -0.15 |
+| 零速度 | 0.0 | 0.0 |
+
+倒退的轉向以「車頭旋轉方向」定義。差速底盤不能側移，其餘四軸都須為零。
+零速度訊息不會自行切換模式；需要鎖定停止時應呼叫 STOP。
+更換方向前先停止舊發布器，若更換期間已逾時進入 STOP，必須重新請求 MANUAL。
+
+## 手控後返回巡邏與停止原因
+
+只要切入 MANUAL 就設定 `restart_required=true`（沒有里程計，無法確認實際是否移動）。
+此時不允許直接接續原任務；需回到原巡邏起點、朝向主幹道，再切 STOP 並呼叫：
+
+```bash
+ros2 service call /control/set_mode rcl_interfaces/srv/SetParametersAtomically "{parameters: [{name: mode, value: {type: 4, string_value: STOP}}]}"
+# 取消持續的手控速度發布器，並確認車子已位於原起點且朝向正確
+ros2 service call /control/reset_at_start std_srvs/srv/Trigger '{}'
+```
+
+確認重設回覆 `success: true` 後，再開始新的巡邏任務：
+
+```bash
+ros2 service call /control/set_mode rcl_interfaces/srv/SetParametersAtomically "{parameters: [{name: mode, value: {type: 4, string_value: AUTO}}]}"
+```
+
+它只確認目前有走道幾何且車體範圍淨空，**無法證明這就是正確起點**；實際位置與朝向由
+操作者負責確認。成功後再請求 AUTO。DONE／FAILED 也需要明確重設，切模式不會清除故障。
+AUTO→STOP→AUTO 且未經手控時，會保留任務、更新靜止幾何並暫停狀態計時；若人在 STOP
+期間推動車子，也必須走回起點重設流程。無法重新確認幾何時保持零速度。
+
+`/control/status` JSON 範例：
+
+```json
+{"mode":"STOP","route_state":"MAIN","reason":"OPERATOR_STOP","restart_required":false,"commanded_motion":"STOPPED","linear_x":0.0,"angular_z":0.0,"physical_stop_confirmed":false}
+```
+
+`commanded_motion` 為指令分類 STOPPED／FORWARD／REVERSE／ROTATING，不是實測車速；
+轉彎行進可同時查看 angular_z。常見原因有 STARTUP_STOP、OPERATOR_STOP、MANUAL_TIMEOUT、
+MANUAL_OBSTACLE、SCAN_NOT_READY、INVALID_SCAN、EXTERNAL_STOP、RELOCALIZING、
+RESET_AT_START_REQUIRED；AUTO 故障保留控制器的原始 failure 名稱。
+
+截至 2026-10-28，使用者已回報 Gazebo 手控移動成功；這不代表全部模式切換與安全情境
+已驗證。仍須逐項驗證模式互斥、鬆鍵停止、指令中斷停車、雷達失聯停車，以及手控後
+禁止直接恢復自動巡邏。三模式功能尚未確認完成實車驗收。

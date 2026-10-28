@@ -153,7 +153,116 @@ source install/setup.bash
 | 模擬里程計 | 橋接至 `/odom`，但目前直行控制器不訂閱 |
 | 相機 | `/camera/depth/image_raw`、`/camera/color/image_raw`、`/camera_right/image_raw`，依啟動模式橋接 |
 
-實體 LiDAR 已完成 60 秒靜止量測，共取得 721 幀；依四個車體角柱的固定近距離回波與雷達近距離盲區，巡邏設定排除車體角度 `[33°,43°]`、`[131°,141°]`、`[-145°,-134°]`、`[-42°,-30°]`。原始雷達的 `215°～226°` 與 `318°～330°` 已換算為程式使用的 `-180°～180°` 表示。這些射線不參與近障礙、牆線、路口或行車淨空判斷；總盲區為 43°，安全車身尺寸仍須包含立柱外緣。若改變雷達或立柱安裝位置，必須重新量測，不能直接沿用。
+實體 LiDAR 曾完成 60 秒靜止量測，共取得 721 幀；四個角柱的原遮罩總寬 43°。目前依使用者要求保留各段中心、每段擴為 15°：車體角度 `[30.5°,45.5°]`、`[128.5°,143.5°]`、`[-147°,-132°]`、`[-43.5°,-28.5°]`，總盲區 60°，已達設定上限。以 `0°～360°` 表示則為 `30.5°～45.5°`、`128.5°～143.5°`、`213°～228°`、`316.5°～331.5°`。這是待實車核對的設定，尚未證實障礙來源；需對照診斷的 `angle_deg`／`range_m`，不能藉此忽略真正的前方障礙。
+
+這些射線不參與近障礙、牆線、路口或行車淨空判斷；本次未修改安全距離及辨識門檻，前後與左右側主要量測區仍保留，但不能保證斜向點減少完全不影響幾何辨識。安全車身尺寸仍須包含立柱外緣，盲區內障礙不能保證被偵測。若改變雷達或立柱安裝位置，必須重新量測，不能直接沿用。詳見 [角柱遮罩設定與實車確認](rl_pig_pen/README.md)。
+
+## Xavier 實車啟動入口
+
+新增可選的 `start-modes` 入口：巡邏 AUTO／手控 MANUAL／停止 STOP，啟動預設 STOP，
+以 ROS 2 服務切模式並由 `/manual/cmd_vel` 接收手控指令。不包含網頁；原本 `start-patrol`
+維持原行為。介面、部署與操作詳見 [三模式控制說明](rl_pig_pen/README.md#可選的三模式控制巡邏手控停止)。
+巡邏途中可請求切手控，但雷達或車體淨空不符合時會保持停止；進入手控後，返回自動
+需要回起點明確重設。詳見 [切手控的注意事項與指令順序](rl_pig_pen/README.md#巡邏途中切換手控條件與操作順序)，
+包含 Gazebo／Xavier 操作環境、八種移動組合、STOP 與重新開始巡邏的指令。
+
+使用 [scripts/start_robot.sh](scripts/start_robot.sh)，在 **Xavier 主機**操作既有的
+`robot-dev` 容器。完整巡邏使用 `fsm_lidar_patrol.py → /cmd_vel → wheeltec_uart_bridge`，
+不再啟動舊 `mecanum_driver`／`obstacle_avoidance`。腳本明確載入
+`/workspace/pig_patrol/wheeltec_uart_bridge/config/uart_bridge.yaml`，並顯示巡邏設定與實際限速。
+目前採用板上版本的掛載配置：`/home/yu/Desktop/pig_patrol:/workspace/pig_patrol`，
+可用 `ROBOT_PROJECT_CONTAINER` 指定其他專案位置；workspace 仍是 `/workspace`。
+
+先依 [部署與啟動說明](wheeltec_uart_bridge/README.md#新版-xavier-啟動腳本2026-10-15)
+搬入原始碼並在容器內編譯 UART bridge。使用者提供的 Dockerfile 只包含雷達驅動，
+尚未包含本巡邏程式與 UART bridge；原 Dockerfile 本次未修改。
+
+```bash
+# 在 Xavier 主機，路徑依實際搬移位置調整
+bash /home/yu/ros2_ws/start_robot.sh status
+bash /home/yu/ros2_ws/start_robot.sh test-safe
+# 下列指令會啟動實際巡邏，先確認急停與測試區安全
+bash /home/yu/ros2_ws/start_robot.sh start-patrol
+# 另一終端請求停止本腳本啟動的控制程序
+bash /home/yu/ros2_ws/start_robot.sh stop
+```
+
+`test-safe` 的速度輸出改到 `/test_cmd_vel`，不啟動 bridge；仍需隔離馬達，防止其他
+訂閱者使用測試指令。`stop` 嘗試先停 FSM、送零速度，再關閉 bridge，不直接停止
+Docker，且不會停止舊／手動啟動的程序。它沒有實體停穩回授，不能取代急停。
+巡邏與 bridge 日誌存於掛載 workspace 的 `logs/robot/`，可檢查「障礙診斷」。
+
+### 開機自動設定雷達網卡
+
+將本專案新版 `scripts/start_robot.sh` 複製到 Xavier 的
+`/home/yu/ros2_ws/start_robot.sh`。`start`、`test-safe`、`start-patrol` 會先確認容器使用
+host 網路，再設定主機雷達網卡；`status`、`stop`、`start-base` 不設定網卡。
+新增的 `setup-network` 僅設定主機網路，不需要 Docker，也不啟動雷達或車子。
+
+預設使用 `eth0`、主機 `192.168.1.100/24`，並保留雷達舊目的位址
+`192.168.1.102/24`，雷達本身預期為 `192.168.1.200`。腳本最多等待 30 秒讓網卡及實體
+連線就緒，只補上缺少的 IP，不刪除既有位址、不變更預設路由，也不修改雷達內部 IP。
+雷達路由若未經指定網卡，會停止啟動並顯示原因。這是在每次啟動時重新套用，並非修改
+NetworkManager 的永久設定；仍須確認網路管理服務不會在稍後移除這些位址。
+
+可先單獨測試，這個指令不會控制車子：
+
+```bash
+sudo /usr/bin/bash /home/yu/ros2_ws/start_robot.sh setup-network
+```
+
+既有 `pig-pen-patrol.service` 使用 `User=yu`，開機時無法互動輸入 sudo 密碼。
+在 Xavier 執行 `sudo systemctl edit pig-pen-patrol.service`，新增：
+
+```ini
+[Service]
+ExecStartPre=+/usr/bin/bash /home/yu/ros2_ws/start_robot.sh setup-network
+```
+
+這行會追加在原有 Docker 啟動前置命令之後、巡邏主程序之前；不要加入空白的
+`ExecStartPre=` 清掉原有命令。`+` 只讓這個網路前置步驟以 root 執行，巡邏仍使用
+原本的 `User=yu`，不需要設定免密碼 sudo。修改後執行：
+
+```bash
+sudo systemctl daemon-reload
+systemctl cat pig-pen-patrol.service
+```
+
+準備好測試區後才執行 `sudo systemctl restart pig-pen-patrol.service`，因為這會啟動
+完整巡邏。檢查 `journalctl -u pig-pen-patrol.service -b -n 100 --no-pager`，應先看到
+「雷達網路已就緒」，接著還要確認實際收到 LaserScan；網卡設定成功不代表雷達已送資料。
+外部停車／放行行為由 `vision_required` 決定，本次不修改這項設定。
+
+非預設環境可在同一個 systemd override 的 `[Service]` 加入 `Environment=`：
+
+| 變數 | 預設值 | 用途 |
+| --- | --- | --- |
+| `RADAR_INTERFACE` | `eth0` | 雷達連接的實體網卡 |
+| `RADAR_HOST_IP` | `192.168.1.100/24` | 主機接收位址 |
+| `RADAR_COMPAT_IP` | `192.168.1.102/24` | 相容舊目的位址；明確設為空字串可略過新增，但不會移除已有位址 |
+| `RADAR_DEVICE_IP` | `192.168.1.200` | 用於核對主機路由，不會改寫驅動或雷達設定 |
+| `RADAR_LINK_WAIT_SEC` | `30` | 等待網卡與實體連線的秒數，範圍 0～300 |
+
+例如 `Environment=RADAR_INTERFACE=enp1s0`。手動執行時也可用同名環境變數指定。
+若有另一個容器也在執行雷達驅動，仍須另行處理；本腳本不會自動停止其他容器。
+
+若先前版本顯示「已有本腳本的啟動／控制工作執行中」，但啟動程序已退出，可能是
+ROS CLI daemon 繼承了 `control.lock` 的 fd 9。新版會在所有 ROS CLI 呼叫（含 timeout
+包裝）關閉這個描述符，保留主控制程序的互斥鎖。更新腳本不會解除已在執行的舊 daemon
+所持有的鎖：先取消等待中的手動 `/cmd_vel` 發布指令、停止巡邏服務，再執行：
+
+```bash
+docker exec robot-dev bash -lc '
+source /opt/ros/humble/install/setup.bash
+source /workspace/install/local_setup.bash
+ros2 daemon stop
+'
+```
+
+這只停止 ROS CLI 的背景查詢 daemon，不會停止雷達節點，也不是底盤停車指令。
+不要刪除控制鎖檔或取消互斥檢查。清除舊 daemon 後，可先用 `start-base` 驗證 UART
+bridge 開啟成功，再單獨測試底盤。這個修正解決鎖殘留，不代表雷達 UDP 或 `/x10/scan`
+收不到資料的問題也已排除。
 
 ## 鐳神 M10P-PHY 實體連接
 

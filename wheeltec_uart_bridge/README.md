@@ -344,6 +344,7 @@ source /workspace/install/setup.bash
 
    ```bash
    ros2 run wheeltec_uart_bridge wheeltec_uart_bridge_node --ros-args \
+     --params-file /workspace/src/wheeltec_uart_bridge/config/uart_bridge.yaml \
      -p port:=/dev/ttyACM0
    ```
 
@@ -359,6 +360,91 @@ source /workspace/install/setup.bash
 5. **停止與驗收。** 先停止 FSM／手動速度發布者，再確認 bridge 的 0.5 秒命令
    逾時停止確實生效。必要時可送一次零速度作為輔助，但仍在執行的控制器可能
    立即覆蓋它；不能用單次零指令取代急停。確認實車停止後才關閉 bridge／容器。
+
+### 新版 Xavier 啟動腳本（2026-10-15）
+
+專案提供 [scripts/start_robot.sh](../scripts/start_robot.sh)，取代使用者提供的舊版
+`start_robot.sh`。舊版的 `start-patrol` 啟動的是 `mecanum_driver` 與
+`obstacle_avoidance`，並未讀取本專案的巡邏設定或 UART 限速。
+新版使用 `fsm_lidar_patrol.py` 與 `wheeltec_uart_bridge`，不使用 `linear.y`
+轉向；前後為 `linear.x`，左右旋轉為 `angular.z`。
+
+腳本在 **Xavier 主機**執行，不是在 Docker 裡執行。部署位置：
+
+```text
+/home/yu/ros2_ws/                  # 若已掛載，容器內為 /workspace
+├── scripts/start_robot.sh
+├── rl_pig_pen/                    # 完整 Python 程式與 patrol_config.json
+└── src/wheeltec_uart_bridge/      # 完整套件，含 config/uart_bridge.yaml
+```
+
+先備份板子上的舊啟動腳本與實車設定，再搬新版；只搬這個 `.sh` 不夠。
+在既有 Humble 容器內編譯本套件（不能搬桌機的 build/install）：
+
+```bash
+source /opt/ros/humble/install/setup.bash
+cd /workspace
+colcon build --symlink-install --packages-select wheeltec_uart_bridge
+```
+
+若 ROS 位於 `/opt/ros/humble/setup.bash` 則改 source 該路徑。需具備 NumPy、
+rclpy、geometry_msgs、sensor_msgs、std_msgs、rclcpp、ament_cmake 與 colcon；
+腳本另使用 `flock`（util-linux）、`pgrep`（procps）、`timeout`（coreutils）。
+新版不在每次啟動時執行 apt、修改網路或建立 privileged 容器。
+
+使用者提供的 Dockerfile 以 `dustynv/ros:humble-desktop-l4t-r35.4.1` 為基底，
+只 COPY／編譯 `Lslidar_ROS2_driver`，CMD 預設啟動雷達；它沒有納入本巡邏程式
+與 UART bridge，也未明列 NumPy、procps、util-linux 等需求（可能由基底提供，
+需在實際容器確認）。可先沿用容器與掛載的原始碼，依上方指令編譯，不必為了此
+腳本立即重建 image。本次未修改提供的 Dockerfile、未建置 image。
+若把主機資料夾掛到 `/workspace`，會遮住 image 在該路徑預先編譯的檔案，
+須確認實際掛載內有 Humble／ARM64 的 `install/local_setup.bash` 與所需套件。
+Dockerfile 的存在也不代表目前 `robot-dev` 正在使用該 image。
+
+確認容器已啟動、網路／裝置映射正確後，在主機執行：
+
+```bash
+# 只查狀態與實際參數，不啟動馬達
+bash /home/yu/ros2_ws/scripts/start_robot.sh status
+
+# 軟體隔離測試：8 秒，速度改發 /test_cmd_vel，不啟動 UART bridge
+# 仍須先隔離馬達，確保沒有其他程式訂閱測試 Topic 來驅動底盤
+bash /home/yu/ros2_ws/scripts/start_robot.sh test-safe
+
+# 完整巡邏：確認急停、場地與低速設定後才執行，車子可能立即移動
+bash /home/yu/ros2_ws/scripts/start_robot.sh start-patrol
+
+# 在另一個主機終端請求停止
+bash /home/yu/ros2_ws/scripts/start_robot.sh stop
+```
+
+`start` 只準備雷達；`start-base` 只啟動 bridge（其他新 `/cmd_vel` 仍能使車子移動）。
+容器不存在或未運行時腳本會報錯，不自行建立或啟動不明服務。預設容器 `robot-dev`、
+容器 workspace `/workspace`、串口 `/dev/ttyACM0`、雷達 `/x10/scan`；可用
+`ROBOT_CONTAINER`、`ROBOT_WS_CONTAINER`、`ROBOT_PORT`、`ROBOT_SCAN_TOPIC`
+覆寫，特殊 ROS 路徑則用 `ROBOT_ROS_SETUP`。
+
+新版會檢查已有的控制程序與 `/cmd_vel` 發布者，發現舊 `mecanum_driver`、
+`obstacle_avoidance`、其他巡邏或 bridge 時拒絕啟動，不自動殺掉它們。
+此檢查不能禁止其他程序日後加入，跨容器也須使用一致的 ROS domain／網路。
+雷達必須實際收到 LaserScan，不是只看到 Topic 名稱就算就緒。
+UART 使用**原始碼目錄**的 `config/uart_bridge.yaml` 作為 `--params-file`，
+沒有檔案就拒絕啟動，避免默默使用 C++ 預設速度；啟動會顯示實際設定路徑、
+巡邏速度、角柱遮罩、bridge 參數與日誌位置。設定變更需停車後重啟。
+
+`stop` 先停止本腳本記錄的 FSM，再在 bridge 尚存時嘗試持續送零速度，最後關閉
+該 bridge，保留雷達與容器。它不會停止舊腳本或手動啟動的控制程序，亦無實體停穩
+回授；**不能當硬體急停**。Ctrl-C 會嘗試相同停止流程；SSH 中斷、主機／容器被
+強制終止、串口斷線時不能保證停止，必須由底盤獨立看門狗與實體急停保護。
+
+每次啟動的日誌位於容器 `/workspace/logs/robot/<時間與隨機碼>/`：
+`patrol.log`、`bridge.log`、`test-safe.log`，只有腳本新啟動雷達時才有 `lidar.log`。
+若 `/workspace` 綁定主機 `/home/yu/ros2_ws`，主機對應 `logs/robot/` 可直接查看。
+原本 Dockerfile 的 CMD 或其他容器啟動的雷達日誌不會自動搬到這裡。
+
+驗證範圍：Shell 語法檢查與 12 項假 Docker／ROS／UART 測試通過，涵蓋啟動選項、
+明確參數、衝突拒絕、測試 Topic 隔離、串口啟動失敗、啟動中取消、過期 PID 防護
+及停止順序；未連接實際裝置，不能取代板端聯調。
 
 ### 文件回報與剩餘待辦
 

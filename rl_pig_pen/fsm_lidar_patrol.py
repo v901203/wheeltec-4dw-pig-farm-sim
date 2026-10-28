@@ -467,7 +467,7 @@ class LidarPatrolNode(Node):
                 started_at=self.last_received + self.receive_pause))
 
 
-def main(args=None):
+def main(args=None, node_factory=LidarPatrolNode):
     # Do not let rclpy's SIGINT handler invalidate the context before the
     # final stop. The handlers only request exit; ROS is closed afterwards.
     stopping = Event()
@@ -477,7 +477,7 @@ def main(args=None):
         for sig in previous_handlers:
             signal.signal(sig, lambda *_: stopping.set())
         rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
-        node = LidarPatrolNode()
+        node = node_factory()
         while rclpy.ok(context=node.context) and not stopping.is_set():
             rclpy.spin_once(node, timeout_sec=.1)
     except (KeyboardInterrupt, ExternalShutdownException):
