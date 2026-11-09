@@ -47,6 +47,7 @@ class Config:
     stop_margin: float = 0.18
     brake_deceleration: float = 1.5
     control_dt: float = 1.0 / 12.0
+    persistent_recovery: bool = False  # Wait indefinitely for recoverable faults.
     sensor_timeout: float = 3.0  # wall seconds, including a paused simulator
     vision_required: bool = False  # Require peer heartbeat; stop requests always remain active.
     vision_status_timeout: float = 1.0  # monotonic receive time, not ROS time
@@ -106,6 +107,8 @@ def load_config(path=CONFIG_FILE):
                 "junction_tracking_max_translation", "junction_geometry_timeout", "turn_kp")
     if any(not math.isfinite(getattr(cfg, key)) or getattr(cfg, key) <= 0 for key in positive):
         raise ValueError("Patrol distances, speeds and times must be finite and positive")
+    if type(cfg.persistent_recovery) is not bool:
+        raise ValueError("persistent_recovery must be a boolean")
     if type(cfg.vision_required) is not bool:
         raise ValueError("vision_required must be a boolean")
     if any(type(getattr(cfg, key)) is not int or getattr(cfg, key) < 1 for key in

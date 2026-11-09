@@ -56,8 +56,20 @@ class ModeControlNode(LidarPatrolNode):
         self.reset_service = self.create_service(Trigger,
             "/control/reset_at_start", self.reset_at_start)
         self.controller.pause_external()
+        initial_mode = self.declare_parameter("initial_mode", "STOP").value
+        if initial_mode not in ("STOP", "AUTO"):
+            raise ValueError("initial_mode must be STOP or AUTO")
+        if initial_mode == "AUTO":
+            # Arm automatic patrol, but retain the stationary localization and
+            # external-stop gate until consecutive safe scans permit motion.
+            self.mode = "AUTO"
+            self.auto_started = True
+            self.mode_reason = "STARTUP_RELOCALIZING"
         self.publish_state()
-        self.get_logger().info("三模式控制已啟動：STOP；等待 ROS 2 模式切換請求")
+        self.get_logger().info(
+            f"三模式控制已啟動：{self.mode}；" +
+            ("確認雷達、安全距離與走道後自動巡邏" if self.mode == "AUTO"
+             else "等待 ROS 2 模式切換請求"))
 
     def _positive_parameter(self, name, default):
         value = self.declare_parameter(name, default).value
@@ -229,7 +241,12 @@ class ModeControlNode(LidarPatrolNode):
             command, blocked = safe_command(self.manual_command, self.features,
                 self.controller.cfg, allow_reverse=True)
             if blocked:
+                requested = self.manual_command
+                # Send zero before generating diagnostics; never delay stopping.
                 self._stop("MANUAL_OBSTACLE")
+                details = self.controller._clearance_details(requested, self.features)
+                self.get_logger().warning(
+                    "手控障礙診斷：" + json.dumps(details, ensure_ascii=False))
             else:
                 self.mode_reason = "MANUAL_COMMAND" if self.manual_received is not None else "WAITING_MANUAL_COMMAND"
                 self._emit(command)

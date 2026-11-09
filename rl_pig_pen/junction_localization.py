@@ -20,9 +20,16 @@ class JunctionGeometry:
     axes: tuple        # Two undirected corridor axes, radians in base frame.
     confidence: float
     widths: tuple = ()  # Per-axis wall separation, measured at acquisition.
+    evidence: dict = None  # Current measured wall identities; never world pose.
 
 
-def junction_geometry(features, cfg):
+def line_record(line):
+    return {"angle": float(line.angle), "normal": line.normal.tolist(),
+            "offset": float(line.offset), "span": float(line.span),
+            "residual": float(line.residual), "count": int(line.count)}
+
+
+def junction_geometry(features, cfg, diagnostics=None):
     """Find two perpendicular wall pairs with actual gaps on all four walls.
 
     Merely fitting a rectangle also describes a closed room. Support on BOTH
@@ -31,6 +38,9 @@ def junction_geometry(features, cfg):
     """
     radius = cfg.junction_fit_radius
     lines = wall_lines(features.ranges, features.angles, radius, max_lines=8)
+    if diagnostics is not None:
+        diagnostics.update(radius=float(radius), lines=[line_record(l) for l in lines],
+                           candidates=[], rejected={}, result="no_candidate")
     valid = (features.ranges > .05) & (features.ranges < radius)
     points = np.column_stack((features.ranges[valid]*np.cos(features.angles[valid]),
                               features.ranges[valid]*np.sin(features.angles[valid])))
@@ -59,6 +69,7 @@ def junction_geometry(features, cfg):
             if np.linalg.norm(centre) > cfg.junction_acquire_distance:
                 continue
             confidence, support = 1.0, 0
+            openings = []
             for pair, cross in ((a, b), (b, a)):
                 direction = np.array([math.cos(pair[2]), math.sin(pair[2])])
                 for line_index in pair[:2]:
@@ -69,7 +80,16 @@ def junction_geometry(features, cfg):
                     before = np.count_nonzero(along < -half_gap-.04)
                     after = np.count_nonzero(along > half_gap+.04)
                     inside = np.count_nonzero(np.abs(along) < half_gap-.10)
-                    if min(before, after) < 3 or inside > max(2, .10*len(along)):
+                    openings.append({"line": int(line_index), "before": int(before),
+                                     "after": int(after), "inside": int(inside),
+                                     "half_gap": float(half_gap)})
+                    # Distant wall points must not dilute occupied opening
+                    # evidence. Use the weaker opening flank, not the entire
+                    # fitted wall (which can span several pens).
+                    if min(before, after) < 3 or inside > max(2, .10*min(before, after)):
+                        if diagnostics is not None:
+                            reason = "insufficient_flanks" if min(before, after) < 3 else "occupied_opening"
+                            diagnostics["rejected"][reason] = diagnostics["rejected"].get(reason, 0)+1
                         confidence = 0.0
                         break
                     support += min(before, after)
@@ -77,17 +97,31 @@ def junction_geometry(features, cfg):
                                      min(1.0, line.span/1.0))
                 if confidence == 0:
                     break
+            evidence = {"line_pairs": [list(a[:2]), list(b[:2])],
+                        "lines": [line_record(lines[i]) for i in (a[0], a[1], b[0], b[1])],
+                        "openings": openings}
+            if diagnostics is not None:
+                record = {"centre": centre.tolist(), "widths": [float(a[5]), float(b[5])],
+                          "confidence": float(confidence), "score": float(confidence*support),
+                          "evidence": evidence,
+                          "accepted": bool(confidence >= cfg.junction_min_confidence)}
+                diagnostics["candidates"].append(record)
             if confidence >= cfg.junction_min_confidence:
                 candidates.append((confidence*support, JunctionGeometry(
                     centre, (axis_angle(a[2]), axis_angle(b[2])), confidence,
-                    (a[5], b[5]))))
+                    (a[5], b[5]), evidence)))
     if not candidates:
         return None
     candidates.sort(key=lambda item: item[0], reverse=True)
     score, best = candidates[0]
     if any(value >= .65*score and np.linalg.norm(other.centre-best.centre) > .20
            for value, other in candidates[1:]):
+        if diagnostics is not None:
+            diagnostics["result"] = "ambiguous_centres"
         return None
+    if diagnostics is not None:
+        diagnostics.update(result="selected", selected_centre=best.centre.tolist(),
+                           selected_widths=list(best.widths), selected_evidence=best.evidence)
     return best
 
 
@@ -107,6 +141,7 @@ class JunctionTracker:
         self.delta_pose = np.zeros(3)
         self.failure = None
         self.update_diagnostics = {}
+        self.wall_diagnostics = []
 
     def observe_walls(self, features):
         """Track an acquired crossing with >=3 walls on two independent axes.
@@ -117,6 +152,7 @@ class JunctionTracker:
         commanded displacement is integrated. Missing both walls of either
         axis, ambiguous matches, or large changes return None.
         """
+        self.wall_diagnostics = []
         for scale in (1.0, .8, .65):
             geometry = self._observe_walls(features, scale * self.cfg.junction_fit_radius)
             if geometry is not None:
@@ -129,6 +165,9 @@ class JunctionTracker:
             return None
         lines = wall_lines(features.ranges, features.angles, radius, max_lines=8)
         lines = [line for line in lines if line.span >= .5 and line.residual <= .03]
+        diagnostic = {"radius": float(radius), "lines": [line_record(l) for l in lines],
+                      "result": "no_wall_match"}
+        self.wall_diagnostics.append(diagnostic)
         proposals = [axis_angle(line.angle - axis) for line in lines for axis in previous.axes
                      if abs(axis_angle(line.angle - axis)) <= self.cfg.junction_tracking_max_angle]
         candidates = []
@@ -172,8 +211,11 @@ class JunctionTracker:
             if (residual > .04 or np.linalg.norm(centre - predicted) > translation_limit or
                     np.linalg.norm(centre) > self.cfg.junction_acquire_distance):
                 continue
+            evidence = {"matched_lines": [int(v[5]) for v in values],
+                        "lines": [line_record(lines[v[5]]) for v in values],
+                        "fit_residual": residual}
             geometry = JunctionGeometry(centre, tuple(axis_angle(a + delta_fit) for a in previous.axes),
-                                        float(min(weights)), previous.widths)
+                                        float(min(weights)), previous.widths, evidence)
             candidates.append((sum(v[0] for v in values), geometry))
         if not candidates:
             return None
@@ -181,7 +223,9 @@ class JunctionTracker:
         score, best = candidates[0]
         if any(value >= .9 * score and np.linalg.norm(other.centre - best.centre) > .06
                for value, other in candidates[1:]):
+            diagnostic["result"] = "ambiguous_wall_matches"
             return None
+        diagnostic.update(result="selected", centre=best.centre.tolist(), evidence=best.evidence)
         return best
 
     def update(self, geometry, stamp):

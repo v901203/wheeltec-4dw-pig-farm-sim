@@ -102,8 +102,9 @@ class CornerMaskTests(unittest.TestCase):
                                (-43.5, True), (-28.5, True), (0, False),
                                (90, False), (-90, False), (180, False)):
             with self.subTest(angle=angle):
-                node = SimpleNamespace(cfg=self.cfg, last_command=(.2, 0),
-                                       controller=TraditionalPatrolController(self.cfg))
+                legacy_cfg = replace(self.cfg, persistent_recovery=False)
+                node = SimpleNamespace(cfg=legacy_cfg, last_command=(.2, 0),
+                                       controller=TraditionalPatrolController(legacy_cfg))
                 result = LidarPatrolNode.measured_hazard(node, self.scan(angle))
                 if ignored:
                     self.assertIsNone(result)

@@ -24,7 +24,7 @@ class PatrolNodeTests(unittest.TestCase):
     def setUp(self):
         # Bypass Node.__init__: no DDS participant, serial port or robot output.
         self.node = object.__new__(LidarPatrolNode)
-        self.node.cfg = replace(load_config(), vision_required=False)
+        self.node.cfg = replace(load_config(), vision_required=False, persistent_recovery=False, junctions=3)
         self.node.controller = TraditionalPatrolController(self.node.cfg)
         self.node.pub = Mock()
         self.node.state_pub = Mock()
@@ -32,6 +32,21 @@ class PatrolNodeTests(unittest.TestCase):
         self.node.reported = None
         self.node.init_scan_health()
         self.node.get_logger = Mock(return_value=Mock())
+
+    def test_debug_status_reports_hold_without_changing_peer_state(self):
+        import json
+        self.node.debug_pub = Mock()
+        c = self.node.controller
+        c.junctions_done, c.endpoints_reached = 2, 4
+        c.obstacle = {"reason": "footprint_wait", "phase": "WAIT"}
+        self.node.publish_state()
+        state = self.node.state_pub.publish.call_args.args[0].data
+        detail = json.loads(self.node.debug_pub.publish.call_args.args[0].data)
+        self.assertEqual(state, "MAIN")
+        self.assertEqual(detail["junctions_done"], 2)
+        self.assertEqual(detail["endpoints_reached"], 4)
+        self.assertEqual(detail["reason"], "footprint_wait")
+        self.assertEqual(detail["obstacle_phase"], "WAIT")
 
     def assert_stopped(self):
         command = self.node.pub.publish.call_args.args[0]
@@ -111,7 +126,11 @@ class PatrolNodeTests(unittest.TestCase):
         scan.header = SimpleNamespace(stamp=SimpleNamespace(sec=2, nanosec=0))
         with patch("fsm_lidar_patrol.time.monotonic", return_value=1.4):
             self.node.on_scan(scan)
-        self.assertEqual(self.node.controller.failure, "scan_gap")
+        self.assertIsNone(self.node.controller.failure)
+        self.assertEqual(self.node.controller.state, "MAIN")
+        self.assertIsNotNone(self.node.scan_hold_since)
+        self.assertEqual(self.node.recovery_frames, 0)
+        self.assert_stopped()
 
     def test_receive_gap_pauses_before_hard_timeout(self):
         scan = StaticLidarScene().scan(self.node.cfg.start)
@@ -264,7 +283,11 @@ class PatrolNodeTests(unittest.TestCase):
         jumped = scene.scan((0, -6.18, self.node.cfg.start[2] + math.radians(35)))
         self.deliver(jumped, 2.13)
         self.assert_stopped()
-        self.assertEqual(self.node.controller.failure, "junction_axis_jump")
+        self.assertIsNone(self.node.controller.failure)
+        self.assertEqual(self.node.controller.state, "TURN_LEFT")
+        self.assertIsNotNone(self.node.scan_hold_since)
+        self.assertEqual(self.node.recovery_frames, 0)
+        self.assert_stopped()
 
     def test_valid_but_unlocalized_scans_cannot_extend_recovery_forever(self):
         import numpy as np

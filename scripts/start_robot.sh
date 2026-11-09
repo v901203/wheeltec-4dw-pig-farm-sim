@@ -119,10 +119,20 @@ fi
 docker exec -i "$CONTAINER" bash -s -- "$ACTION" \
     "${ROBOT_WS_CONTAINER:-/workspace}" "${ROBOT_PORT:-/dev/ttyACM0}" \
     "${ROBOT_SCAN_TOPIC:-/x10/scan}" "${ROBOT_ROS_SETUP:-}" \
-    "${ROBOT_PROJECT_CONTAINER:-/workspace/pig_patrol}" <<'CONTAINER_SCRIPT'
+    "${ROBOT_PROJECT_CONTAINER:-/workspace/pig_patrol}" "${ROBOT_INITIAL_MODE:-STOP}" "${ROBOT_RMW:-rmw_fastrtps_cpp}" <<'CONTAINER_SCRIPT'
 set -euo pipefail
 action="$1"; workspace="$2"; port="$3"; scan_topic="$4"; ros_setup="$5"
 project="${6:-$workspace}"
+initial_mode="${7:-STOP}"
+robot_rmw="${8:-rmw_fastrtps_cpp}"
+case "$robot_rmw" in
+    rmw_fastrtps_cpp|rmw_cyclonedds_cpp) ;;
+    *) echo "不支援的 ROBOT_RMW：$robot_rmw" >&2; exit 2 ;;
+esac
+if [ "$action" = start-modes ] && [ "$initial_mode" != STOP ] && [ "$initial_mode" != AUTO ]; then
+    echo "ROBOT_INITIAL_MODE 必須為 STOP 或 AUTO" >&2
+    exit 2
+fi
 fsm="$project/rl_pig_pen/fsm_lidar_patrol.py"
 if [ "$action" = start-modes ]; then fsm="$project/rl_pig_pen/control_modes.py"; fi
 config="$project/rl_pig_pen/patrol_config.json"
@@ -153,6 +163,9 @@ set +u
 source "$ros_setup"
 source "$workspace/install/local_setup.bash"
 set -u
+# Override Docker's inherited CycloneDDS selection for ALL child ROS nodes.
+export RMW_IMPLEMENTATION="$robot_rmw"
+echo "小車 DDS：$RMW_IMPLEMENTATION"
 
 # Save Linux process start time with the PID to avoid signalling a recycled PID.
 process_start() {
@@ -382,7 +395,9 @@ if [ "$action" = start-patrol ] || [ "$action" = start-modes ]; then
     else
         echo "即將啟動完整巡邏，車子可能立即移動；Ctrl-C 或另一終端的 stop 可請求停止。"
     fi
-    python3 -u "$fsm" --ros-args -p use_sim_time:=false -r /scan:="$scan_topic" \
+    mode_args=()
+    if [ "$action" = start-modes ]; then mode_args=(-p initial_mode:="$initial_mode"); fi
+    python3 -u "$fsm" --ros-args -p use_sim_time:=false "${mode_args[@]}" -r /scan:="$scan_topic" \
         >"$log_dir/patrol.log" 2>&1 9>&- &
     record_pid fsm "$!"
     tail -n +1 -F "$log_dir/patrol.log" "$log_dir/bridge.log" 9>&- &

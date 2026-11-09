@@ -39,7 +39,7 @@ class PatrolShutdownTests(unittest.TestCase):
                 patch.object(patrol.signal, "getsignal", return_value="original"), \
                 patch.object(patrol.signal, "signal", side_effect=lambda sig, h: handlers.update({sig: h})), \
                 patch.object(patrol.sys, "stderr"):
-            patrol.main()
+            patrol.main(node_factory=patrol.LidarPatrolNode)
         init.assert_called_once_with(args=None, signal_handler_options=patrol.SignalHandlerOptions.NO)
         self.assertEqual(handlers, {signal.SIGINT: "original", signal.SIGTERM: "original"})
         return events

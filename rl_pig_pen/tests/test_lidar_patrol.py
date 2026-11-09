@@ -21,7 +21,7 @@ class LidarPatrolTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.scene = StaticLidarScene()
-        cls.cfg = load_config()
+        cls.cfg = replace(load_config(), junctions=3, persistent_recovery=False)
 
     def features(self, pose):
         return scan_features(self.scene.scan(pose), self.cfg)
@@ -555,12 +555,17 @@ class LidarPatrolTests(unittest.TestCase):
         reference = controller.tracker.geometry
         wrong = replace(reference, centre=reference.centre + [.5, 0.])
         with patch("lidar_patrol_controller.junction_geometry", return_value=wrong):
-            for i in range(1, 9):
+            for i in range(1, controller.cfg.confirm_frames + 1):
                 v, _ = controller.command(self.features(pose), i / 12)
-                self.assertGreater(v, 0)
+                if i < controller.cfg.confirm_frames:
+                    self.assertGreater(v, 0)
+                else:
+                    self.assertEqual(v, 0)
+                    self.assertEqual(controller.relocalization["reason"], "junction_geometry_conflict")
                 self.assertEqual(controller.state, "CENTER")
-                self.assertEqual(controller.diagnostics["geometry_source"],
-                                 "tracked_walls_after_rejection")
+                if i < controller.cfg.confirm_frames:
+                    self.assertEqual(controller.diagnostics["geometry_source"],
+                                     "tracked_walls_after_rejection")
                 rejected = controller.diagnostics["rejected_geometry"]
                 self.assertEqual(rejected["reason"], "junction_position_jump")
                 self.assertGreater(rejected["translation_delta_m"], .25)

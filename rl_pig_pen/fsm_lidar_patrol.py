@@ -6,6 +6,8 @@ import math
 import time
 import signal
 import sys
+import os
+from pathlib import Path
 from collections import deque
 from copy import deepcopy
 from dataclasses import replace
@@ -28,6 +30,7 @@ from std_msgs.msg import Bool, String
 
 from lidar_patrol_controller import TraditionalPatrolController, incoming_corridor
 from navigation import SensorFault, lidar_ignore_mask, load_config, scan_features
+from geometry_diagnostics import GeometryDiagnosticsLog
 
 
 STATE_LABELS = {
@@ -109,11 +112,17 @@ class LidarPatrolNode(Node):
             raise ValueError("vision_required must be boolean")
         self.cfg = replace(self.cfg, vision_required=required)
         self.controller = TraditionalPatrolController(self.cfg)
+        geometry_directory = os.environ.get("PIG_PEN_GEOMETRY_LOG_DIR")
+        self.geometry_log = (GeometryDiagnosticsLog(Path(geometry_directory)/f"scan_{time.time_ns()}")
+                             if geometry_directory else None)
         self.last_received = None
         self.reported = None
         self.init_scan_health()
         self.pub = self.create_publisher(Twist, "/cmd_vel", 10)
         self.state_pub = self.create_publisher(String, "/patrol/state", QoSProfile(
+            depth=1, reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        self.debug_pub = self.create_publisher(String, "/patrol/debug", QoSProfile(
             depth=1, reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.pig_stop_sub = self.create_subscription(
@@ -155,6 +164,22 @@ class LidarPatrolNode(Node):
 
     def publish_state(self):
         self.state_pub.publish(String(data=self.controller.state))
+        if getattr(self, "debug_pub", None) is not None:
+            c = self.controller
+            reason = (c.failure or self.scan_hold_reason or
+                      (c.obstacle or {}).get("reason") or
+                      (c.relocalization or {}).get("reason") or
+                      ("external_pause" if c.external_paused else None) or
+                      ("route_complete" if c.state == "DONE" else "正常巡邏"))
+            self.debug_pub.publish(String(data=json.dumps({
+                "state": c.state, "state_label": STATE_LABELS.get(c.state, c.state),
+                "junctions_done": c.junctions_done, "junctions_total": self.cfg.junctions,
+                "endpoints_reached": c.endpoints_reached, "reason": reason,
+                "scan_paused": self.scan_hold_since is not None,
+                "obstacle_phase": (c.obstacle or {}).get("phase"),
+                "relocalizing": c.relocalization is not None,
+                "external_paused": c.external_paused,
+            }, ensure_ascii=False)))
 
     def sync_pig_stop(self, now):
         reason = self.pig_stop_gate.reason(now)
@@ -223,7 +248,13 @@ class LidarPatrolNode(Node):
             recovery_timeout_s=self.cfg.sensor_timeout,
             observed_scan_stamp=self.observed_stamp,
             validated_scan_stamp=self.controller.last_stamp)
+        if self.cfg.persistent_recovery:
+            return (0.0, 0.0)
         return self.controller.fail(reason)
+
+    def scan_recovery_expired(self, now):
+        return (not self.cfg.persistent_recovery and self.scan_hold_since is not None
+                and now - self.scan_hold_since >= self.cfg.sensor_timeout)
 
     def scan_hold_failure_reason(self):
         return ("scan_receive_timeout" if self.scan_hold_reason == "scan_receive_gap"
@@ -251,7 +282,7 @@ class LidarPatrolNode(Node):
             self.recovery_frames = 0
             self.controller.confirm = 0
             self.last_valid_receive = self.last_valid_stamp = None
-        if now - self.scan_hold_since >= self.cfg.sensor_timeout:
+        if self.scan_recovery_expired(now):
             return self.scan_health_failure(self.scan_hold_failure_reason(), now)
         return (0.0, 0.0)
 
@@ -359,7 +390,10 @@ class LidarPatrolNode(Node):
                 self.publish((0.0, 0.0))
                 return
             hazard = self.measured_hazard(scan)
-            if hazard is not None and self.controller.state == "FAILED":
+            if hazard is not None and (self.controller.state == "FAILED" or
+                                      self.controller.diagnostics.get("clearance_hits") and
+                                      any(hit["guard"] == "footprint" for hit in
+                                          self.controller.diagnostics["clearance_hits"])):
                 command = hazard
             else:
                 if not math.isfinite(stamp) or (self.observed_stamp is not None and stamp < self.observed_stamp):
@@ -380,7 +414,7 @@ class LidarPatrolNode(Node):
                         # Do not run trial FSM commands while the peer has us
                         # stopped: that could advance route/endpoint counters.
                         if (self.scan_hold_since is not None and
-                                now - self.scan_hold_since >= self.cfg.sensor_timeout):
+                                self.scan_recovery_expired(now)):
                             command = self.scan_health_failure(self.scan_hold_failure_reason(), now)
                         else:
                             command = self.controller.hold_external(
@@ -395,15 +429,19 @@ class LidarPatrolNode(Node):
                                     self.get_logger().info("LiDAR 已恢復；外部停車仍需獨立解除")
                     elif self.scan_hold_since is None:
                         command = self.controller.command(features, stamp)
-                    elif now - self.scan_hold_since >= self.cfg.sensor_timeout:
+                    elif self.scan_recovery_expired(now):
                         command = self.scan_health_failure(self.scan_hold_failure_reason(), now)
                     else:
                         # Trial processing checks geometry continuity, stamp
                         # gaps and clearance, without advancing the real FSM
                         # or its counters while the output is held at zero.
                         trial = deepcopy(self.controller)
+                        if (self.cfg.persistent_recovery and trial.last_stamp is not None
+                                and trial.state_stamp is not None):
+                            trial.state_stamp += max(0., stamp - trial.last_stamp)
                         command = trial.command(features, stamp, allow_retreat=False)
-                        if self.controller.obstacle is not None:
+                        if (self.controller.obstacle is not None or
+                                (self.cfg.persistent_recovery and trial.relocalization is not None)):
                             # The obstacle layer freezes all route progress;
                             # keep its measured pose and suspended state clock.
                             self.controller = trial
@@ -416,6 +454,7 @@ class LidarPatrolNode(Node):
                                     trial.state in trial.ENTRY_STATES
                                     and trial.entry_phase == "WALL_CONFIRM"):
                                 localized = incoming_corridor(features, self.cfg) is not None
+                            localized = localized and trial.relocalization is None
                             self.recovery_frames = self.recovery_frames + 1 if localized else 0
                             if self.recovery_frames >= self.cfg.confirm_frames:
                                 self.controller = trial
@@ -451,6 +490,28 @@ class LidarPatrolNode(Node):
                     hit["raw_valid"] = math.isfinite(raw) and scan.range_min <= raw <= scan.range_max
         self.publish(command)
 
+        geometry_log = getattr(self, "geometry_log", None)
+        if geometry_log is not None:
+            try:
+                geometry_log.record_scan(scan, stamp, self.controller, {"command": list(command)})
+            except OSError as exc:
+                self.get_logger().warning(f"幾何診斷寫入失敗，停用紀錄：{exc}")
+                try:
+                    geometry_log.close()
+                except OSError:
+                    pass
+                self.geometry_log = None
+
+    def destroy_node(self):
+        geometry_log = getattr(self, "geometry_log", None)
+        if geometry_log is not None:
+            try:
+                geometry_log.close()
+            except OSError as exc:
+                self.get_logger().warning(f"幾何診斷關閉失敗：{exc}")
+            self.geometry_log = None
+        return super().destroy_node()
+
     def check_scan(self):
         now = time.monotonic()
         self.sync_pig_stop(now)
@@ -459,7 +520,7 @@ class LidarPatrolNode(Node):
         if self.last_received is None:
             self.publish((0.0, 0.0))
         elif (self.scan_hold_since is not None and
-              now - self.scan_hold_since >= self.cfg.sensor_timeout):
+              self.scan_recovery_expired(now)):
             self.publish(self.scan_health_failure(self.scan_hold_failure_reason(), now))
         elif now - self.last_received > self.receive_pause:
             self.publish(self.pause_scan(

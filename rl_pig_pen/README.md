@@ -4,6 +4,10 @@
 
 [fsm_lidar_patrol.py](fsm_lidar_patrol.py) 是完整巡邏入口；[fsm_patrol.py](fsm_patrol.py) 保留獨立直行功能，兩個入口擇一執行。
 
+新增開口佔用驗證與連續中心矛盾時的停車重新定位，保留既有位置跳動與安全門檻。
+可用 `PIG_PEN_GEOMETRY_LOG_DIR=logs/geometry` 啟用原始雷達、候選中心與牆線配對的壓縮紀錄，
+預設關閉；詳見[幾何診斷與驗證流程](../rl_junction/docs/history/GEOMETRY_AND_PPO.md)。
+
 ## 成果與驗證狀態（2026-09-29）
 
 使用者已回報完成 Gazebo 路口巡邏測試。現有成果包含主幹道行駛、路口置中、90° 轉彎、左支線前進、跨路口倒退至右支線及返回主幹道。
@@ -122,7 +126,7 @@ source /opt/ros/humble/setup.bash
 
 完整巡邏入口自行處理 Ctrl-C／SIGTERM：先請求退出、在 ROS context 仍有效時送零速度，再銷毀節點與關閉 ROS。若 context 已被外部關閉，則不再向無效 publisher 發送，並提示需由接收端逾時保護；停止指令仍是盡力發送，不保證傳輸成功。退出順序已有模擬介面測試，隔離 ROS 真實訊號驗證尚未完成。
 
-舊的 `scripts/launch_rl_training.sh` 保留在工作區，但它引用的 PPO 程式已刪除，目前不能用來啟動訓練。請使用 `launch_clean.sh` 開啟模擬。
+舊整車 PPO 啟動腳本已清理。傳統巡邏使用 `launch_clean.sh` 開啟模擬；路口學習另見 [RL 說明](../rl_junction/README.md)。
 
 ## 原本直行腳本的控制方式與參數
 
@@ -593,3 +597,260 @@ RESET_AT_START_REQUIRED；AUTO 故障保留控制器的原始 failure 名稱。
 截至 2026-10-28，使用者已回報 Gazebo 手控移動成功；這不代表全部模式切換與安全情境
 已驗證。仍須逐項驗證模式互斥、鬆鍵停止、指令中斷停車、雷達失聯停車，以及手控後
 禁止直接恢復自動巡邏。三模式功能尚未確認完成實車驗收。
+
+## 唯讀移動條件診斷
+
+`check_motion.py` 不發布速度、不呼叫模式切換、不開啟串口；可與巡邏同時執行。
+它讀取雷達、`/cmd_vel`、`/patrol/state`、`/control/status`、可選的 `/odom`、
+朋友停車請求與 `/rosout`，並讀取啟動腳本記錄的最新日誌位置。
+
+在 Xavier 主機執行（先將新版 `check_motion.py` 放入桌面專案的 `rl_pig_pen/`）：
+
+```bash
+docker exec -it robot-dev bash -lc '
+source /opt/ros/humble/install/setup.bash
+source /workspace/install/local_setup.bash
+source /workspace/install_humble_lidar/local_setup.bash
+source /workspace/install_humble_uart/local_setup.bash
+python3 /workspace/pig_patrol/rl_pig_pen/check_motion.py --scan-topic /x10/scan --duration 30
+'
+```
+
+每 2 秒顯示一次 JSON，30 秒後結束。`--duration 0` 持續監看，Ctrl-C 只停止診斷。
+Gazebo 使用 `--scan-topic /scan`，並確保與模擬的 ROS domain 一致。
+
+重點欄位：
+
+- `problems`：未收到雷達／速度、重複時間戳、無效回波、STOP／FAILED／DONE，
+  或目前速度指令在本次安全試算中不符合條件。
+- `safety.probes`：假設前進／後退／左右旋轉，以及目前已發布指令的試算結果；
+  所有假設動作都不會真正送出。預設試算線速度 0.05m/s、轉速 0.2rad/s。
+- `hits`：觸發保護的 `guard`、車身座標角度、點距離與 x/y。
+  `footprint` 為車體保護、`travel` 為行進區、`rotation` 為原地轉向、`sweep` 為弧形掃掠。
+- `limits`：煞停距離、行進距離及旋轉門檻；使用相同 `command_clearance_masks`。
+- `recent_warnings` 是本次訂閱收到的警告，附接收距今時間；
+  `historical_log_clues` 是歷史日誌線索，不代表目前仍被同一原因擋住。
+
+限制：設定來自指定的 JSON（預設為同資料夾的 patrol_config.json），
+並依巡邏入口採至少 0.5 秒反應視窗；控制節點的 ROS 參數覆寫不會自動同步。
+無新鮮 odom 時，量測速度暫以 0 計算並明確提示，不能將安全試算通過當成實車可動保證。
+已發布的零速度不能反推出原本遭遮斷的指令；完整 FSM 幾何、端點確認、重定位及照片停車延後邏輯，
+仍須以控制節點狀態及 patrol.log 的診斷為準。沒有底盤回授也無法確認車輪是否真的轉動。
+
+
+### 實地五路口與持續恢復
+
+`patrol_config.json` 現在設定 `junctions: 5`、`persistent_recovery: true`。
+原本三路口 Gazebo 地圖請使用獨立設定將 `junctions` 改回 3；增加此數字不會增加模擬地圖的路口。
+
+持續恢復會保留目前路段、完成路口及支線端點數。雷達斷訊、無效或重複掃描會持續輸出零速度，
+不因 `sensor_timeout` 到期而結束；收到連續有效掃描並確認局部定位後才恢復。
+長時間掃描中斷會丟棄舊路口追蹤並重新取得幾何。等待不計入路段超時。
+車體保護範圍 `footprint` 命中改為原地等待，不允許自動退避；障礙清除且連續通過
+定位與擴大安全距離檢查後才接續。其他障礙仍保留單次、有限距離的退避機制。
+日誌的「障礙保護」及「重新定位」會呈現原因，雷達問題呈現「雷達安全暫停」。
+
+此設定不會無限重啟程序，也不會清除路線進度。時間戳倒退或非法、路線數量不符等
+不可直接安全接續的錯誤仍保留停止處理；DONE、手控 STOP 及外部停車不會自動解除。
+設定 `persistent_recovery: false` 可恢復有限雷達等待與 footprint 鎖定失敗行為。
+
+部署需同步 `navigation.py`、`lidar_patrol_controller.py`、`fsm_lidar_patrol.py` 和
+`patrol_config.json` 到 Xavier 的 `rl_pig_pen` 資料夾，先停止服務再更新。
+請合併實車既有的速度、雷達遮罩及尺寸設定，勿直接以其他電腦的設定覆蓋。
+
+### Xavier 桌面除錯視窗
+
+`scripts/patrol_debug_gui.py` 在 **Xavier 主機桌面**顯示 ROS 速度指令、巡邏路段、
+完成路口／端點數、等待原因及日誌。主機只需要 Python Tk，ROS 訂閱在既有
+`robot-dev` 容器內執行。GUI 不發布速度；容器暫時未啟動時會持續重連。
+速度是 `/cmd_vel` 指令，不代表實際車速或已停穩；過期資料會標示未知。
+服務顯示 active 也不保證路線正常，請同時看 FAILED、等待原因與日誌。
+
+部署以下檔案（保留資料夾位置）：
+
+- 主機 `/home/yu/Desktop/pig_patrol/scripts/patrol_debug_gui.py`
+- 主機 `/home/yu/Desktop/pig_patrol/rl_pig_pen/fsm_lidar_patrol.py`
+
+專案需繼續掛載至容器 `/workspace/pig_patrol`。新增 `/patrol/debug`
+（`std_msgs/msg/String` JSON，Reliable／Transient Local、2 Hz 預設）提供狀態、
+完成數量與恢復原因；原 `/patrol/state` 格式不變。
+
+在主機安裝一次 GUI 依賴並開啟：
+
+```bash
+sudo apt install python3-tk
+python3 /home/yu/Desktop/pig_patrol/scripts/patrol_debug_gui.py
+```
+
+按鈕：
+
+- **停止巡邏服務**：透過限定的免密碼 sudo 規則執行 `systemctl stop pig-pen-patrol.service`，
+  等待服務完成停止；這不是實體急停。權限或執行失敗會顯示在操作結果。
+- **回到起點後重新出發**：確認已回起點並對準主幹道後，授權執行 service restart。
+  此操作重設路線進度，可能立即移動；不是從任意位置接續。
+- **讀取最近服務日誌**：讀取本次開機最近 35 行 journal；另有 ROS 即時日誌。
+  若帳號沒有 journal 權限，會顯示權限提示。重啟操作期間按鈕停用，避免重複提交。
+
+在 Xavier 主機以管理員執行一次以下設定（這次會要求 sudo 密碼）：
+
+```bash
+sudo bash /home/yu/Desktop/pig_patrol/scripts/install_patrol_gui_permissions.sh yu
+```
+
+請一併搬移 `scripts/install_patrol_gui_permissions.sh` 與新版 GUI。
+腳本只授權 yu 執行 `/usr/bin/systemctl stop pig-pen-patrol.service` 與
+`/usr/bin/systemctl restart pig-pen-patrol.service`，不啟動或停止車子。
+GUI 使用 `sudo -n`，設定完成後按鈕不再要求密碼；缺少權限時直接顯示錯誤。
+重新出發仍保留回起點確認。不要用 sudo 啟動 GUI。
+設定檔為 `/etc/sudoers.d/pig-pen-gui-yu`；移除此檔即可撤銷授權。
+GUI 關閉不停止巡邏，也不會自動重啟服務。
+
+設定登入桌面後自動跳出視窗（以 yu 帳號執行，**不要 sudo**）：
+
+```bash
+python3 /home/yu/Desktop/pig_patrol/scripts/patrol_debug_gui.py --install-autostart
+```
+
+這會建立 `~/.config/autostart/pig-pen-debug.desktop`。開機巡邏仍由原 systemd 服務
+執行；GUI 在圖形桌面登入後出現。沒有登入桌面或純 SSH 時不會跳視窗，也不影響巡邏。
+移除上述 desktop 檔即可取消 GUI 自動開啟。不同容器／掛載路徑可用
+`--container robot-dev --project /workspace/pig_patrol` 指定；安裝自動啟動時也可指定。
+
+### 角柱重新量測（不套用舊遮罩）
+
+`calibrate_lidar_posts.py` 是唯讀工具，直接訂閱原始 `/x10/scan`，不發送速度、不修改設定。
+先停止巡邏服務，保留雷達節點；車子固定不動，清空周圍至少 1 公尺（含人、牆面及雜物），
+檢查線材、手臂位置是否會造成遮擋。不要拔雷達或遮住雷達進行校準。
+
+```bash
+sudo systemctl stop pig-pen-patrol.service
+
+docker exec -it robot-dev bash -lc '
+source /opt/ros/humble/install/setup.bash
+cd /workspace/pig_patrol
+python3 rl_pig_pen/calibrate_lidar_posts.py --duration 60 --output logs/lidar_posts/run1
+'
+```
+
+輸出 `report.json` 與 `raw_scans.jsonl.gz`。預設統計 8～50 cm 回波，角度含實車
+`lidar_yaw` 修正，0° 朝前、正角朝左。每角度格每幀最多計一次，候選至少出現 10 幀
+且佔該格被掃描次數的 20%。範圍內所有穩定物體都可能列為候選；不能直接當成角柱。
+少於 100 幀視為量測不足。15 秒沒有首幀則結束並留下空報告，需先修復雷達連線。
+工具不會自動啟動雷達；巡邏停止後雷達通常保留，若未保留需另外啟動驅動。
+
+建議在另一個空曠位置、改變車身朝向後再量測一次（輸出改為 `run2`）。固定角柱通常
+維持相同車體角度與距離；環境物體則改變。比較兩次報告並對照實際柱子才決定遮罩。
+雷達最小測距內的柱子可能沒有回波，仍需量測柱子幾何，不能將未偵測當成無遮擋。
+現有遮罩總寬限制仍為 60°，報告不會自動改動或繞過限制。
+
+實車啟動腳本相容更新：`scripts/start_robot_xavier.sh` 是從 Xavier 傳回的版本修改，
+保留 `eth1` 與 `install_humble_lidar`、`install_humble_uart` 環境，新增 `start-modes`。
+部署時先備份 Xavier `/home/yu/ros2_ws/start_robot.sh`，再將此檔以該名稱取代。
+同時更新 `rl_pig_pen/control_modes.py`。原 `start-patrol` 仍可使用；三模式入口預設 STOP。
+開機改用三模式時，systemd 的 ExecStart 改為 `start-modes`，daemon-reload 後才生效。
+GUI「重新出發」重啟的是該服務；若服務改用三模式，重啟後也維持 STOP，仍需模式切換。
+
+### 開機自動巡邏，保留手控切換
+
+三模式節點新增 ROS 參數 `initial_mode`，只接受 `STOP`（預設）與 `AUTO`。
+AUTO 啟動仍先保持零速度，通過連續雷達、局部定位與安全檢查後自動巡邏。
+啟動腳本用 `ROBOT_INITIAL_MODE=AUTO` 傳入，僅 `start-modes` 生效。
+
+同步新版 `control_modes.py` 及從實車修改的 `scripts/start_robot_xavier.sh`
+（部署為 `/home/yu/ros2_ws/start_robot.sh`），再執行 `sudo systemctl edit pig-pen-patrol.service`。
+保留原 override 的網路前置步驟，加入：
+
+```ini
+[Service]
+Environment=ROBOT_INITIAL_MODE=AUTO
+ExecStart=
+ExecStart=/usr/bin/bash /home/yu/ros2_ws/start_robot.sh start-modes
+```
+
+`sudo systemctl daemon-reload` 後，在起點且環境安全時重新啟動服務。
+GUI「重新出發」及下次開機都會啟動 AUTO。可用原 `/control/set_mode` 切換
+MANUAL／STOP；MANUAL 只接收 `/manual/cmd_vel`，不得直接操控最終 `/cmd_vel`。
+手控後路線作廢，回起點確認並重設後才能再次 AUTO，不支援任意位置接續。
+
+### 參考機械手臂中控台的桌面安裝
+
+巡邏 GUI 現在持續追蹤本機 `journalctl -u pig-pen-patrol.service -b -f`，
+啟動失敗、Python traceback 與 ROS 啟動前的網路檢查也會自動出現在日誌區。
+即時 ROS 訊息也保留，因此某些事件可能同時顯示兩個來源。可複製選取／全部日誌。
+此處是 GUI 內的日誌區，不是再啟動一份巡邏程序。
+
+將新版 `scripts/patrol_debug_gui.py` 與 `scripts/setup_patrol_desktop.sh` 一起放在
+Xavier `/home/yu/Desktop/pig_patrol/scripts/`，以 yu 登入後執行：
+
+```bash
+bash /home/yu/Desktop/pig_patrol/scripts/setup_patrol_desktop.sh
+```
+
+不要 sudo。安裝器建立登入自動開啟與桌面捷徑，使用 `xdg-user-dir DESKTOP` 找桌面目錄，
+沒有此工具則用 `~/Desktop`。若桌面要求信任捷徑，右鍵選「允許啟動」。
+本安裝器不修改網卡、基地台、手臂 CAN、既有巡邏 service 或 sudo 規則，也不啟動車子。
+GUI 按鈕免密碼仍由先前的 `install_patrol_gui_permissions.sh` 設定。
+
+若先前已建立獨立日誌終端機自動啟動，改用 GUI 中控台後，可手動移除
+`~/.config/autostart/pig-pen-terminal.desktop` 避免同時跳出兩種視窗。
+登入才有視窗；systemd 巡邏仍在未登入桌面時依設定運行。
+
+### 主機 Foxy 手臂與 Docker Humble 小車統一 DDS
+
+現場已觀察到：Fast DDS 查詢可收到主機的 Bool，原 CycloneDDS 查詢沒有資料。
+新版 `start_robot_xavier.sh`／`start_robot.sh` 明確以
+`ROBOT_RMW=rmw_fastrtps_cpp`（預設）覆寫容器繼承的 RMW，雷達、巡邏、UART
+及 ROS CLI 都使用同一設定。GUI 監看也預設 Fast DDS，可用 `--rmw` 指定。
+這不是保證 Foxy/Humble 所有介面都互通，必須實測 Bool、狀態與手控服務。
+
+DDS 選擇只在程序啟動時生效。部署時停止小車服務、關閉 GUI／手動雷達終端機，
+再於容器執行 `python3 /workspace/pig_patrol/scripts/restart_lidar_dds.py --stop`。
+工具拒絕在巡邏或 UART 控制程序仍運行時執行，只識別 M10P launcher 與 /x10 driver，
+檢查 PID 身分後停止，不碰手臂。雷達程序結束後由小車啟動腳本重新啟動。
+可執行一次 `RMW_IMPLEMENTATION=rmw_fastrtps_cpp ros2 daemon stop` 清除舊 CLI daemon；
+此動作不會停止實際 ROS 節點。
+
+主機手臂先確認實際預設 RMW：
+
+```bash
+python3 -c 'from rclpy.utilities import get_rmw_implementation_identifier; print(get_rmw_implementation_identifier())'
+```
+
+若已是 `rmw_fastrtps_cpp`，手臂不必因本次小車設定變更而重啟。若不是，需在手臂
+實際啟動環境中指定同一 RMW，並由手臂負責人依安全停機流程重新啟動，不能只 export
+後期待既有程序改變。
+GUI 更新後要關閉重開；自動校準／診斷等手動指令也需明確指定
+`RMW_IMPLEMENTATION=rmw_fastrtps_cpp`，因 Docker 本身的舊環境可能仍是 CycloneDDS。
+未修改整個容器或手臂工作區，避免影響其他程式。
+
+### 筆電 WebSocket 9090：自訂 Focal/Humble 的 rosbridge
+
+實車容器為 Ubuntu 20.04、Python 3.8、自訂 Humble，不能直接套用 Jammy 的
+`ros-humble-*` 二進位安裝。新增 `scripts/install_rosbridge_humble.sh`，在 Xavier 主機
+執行，透過既有 robot-dev 安裝 Focal 的 Python 相依套件，並從官方固定 1.3.2
+（commit `51fadc5457eadf1a55fe0ef8677cd88dde66da5b`）建置到獨立 overlay：
+
+```bash
+bash /home/yu/Desktop/pig_patrol/scripts/install_rosbridge_humble.sh
+```
+
+來源 `/workspace/src_humble_rosbridge`，建置／安裝／日誌目錄分別為
+`build_humble_rosbridge`、`install_humble_rosbridge`、`log_humble_rosbridge`。
+不覆蓋現有 `install`，不啟動巡邏或 WebSocket。Python 相依套件安裝在容器內，若重建
+容器需重新執行；workspace 掛載的原始碼與建置結果保留。
+
+建置成功後手動啟動，保持此終端機：
+
+```bash
+docker exec -it robot-dev bash -lc '
+source /opt/ros/humble/install/setup.bash
+source /workspace/install_humble_rosbridge/local_setup.bash
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+ros2 launch rosbridge_server rosbridge_websocket_launch.xml port:=9090 address:=0.0.0.0
+'
+```
+
+筆電連 `ws://192.168.50.236:9090`（實際 Wi-Fi IP 變動時需更新），之後確認
+`/control/status`、`/control/set_mode`、`/manual/cmd_vel` 的介面，勿直接發布最終 `/cmd_vel`。
+目前 rosbridge 尚未加入開機服務；手動啟動成功後再安排自動啟動。僅 9090 可連不等於
+模式切換、手控速度或逾時停止已完成驗證。

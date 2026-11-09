@@ -68,6 +68,7 @@ class TraditionalPatrolController:
         "junction_position_jump", "junction_axis_jump", "junction_scan_gap", "scan_gap",
         "junction_geometry_lost", "centre_overshoot", "centre_reposition_limit",
         "turn_centre_drift", "entry_not_confirmed", "state_timeout",
+        "junction_geometry_conflict",
     )
 
     def __init__(self, cfg):
@@ -85,6 +86,9 @@ class TraditionalPatrolController:
         self.junctions_done = 0
         self.endpoints_reached = 0
         self.diagnostics = {}
+        self.geometry_diagnostics = []
+        self.geometry_conflict = None
+        self.geometry_conflict_frames = 0
         self.failure_diagnostics = {}
         self.centre_retreat = False
         self.centre_retries = 0
@@ -217,8 +221,7 @@ class TraditionalPatrolController:
     def _fresh_junction_geometry(self, features):
         """Acquire a crossing independently of the possibly stale tracker."""
         for scale in (1.0, .8, .65):
-            geometry = junction_geometry(features, replace(
-                self.cfg, junction_fit_radius=scale * self.cfg.junction_fit_radius))
+            geometry = self._detect_geometry(features, scale)
             if geometry is not None:
                 return geometry
         return None
@@ -226,6 +229,8 @@ class TraditionalPatrolController:
     def _finish_relocalization(self, stamp, tracker=None, *, corridor=False):
         recovery = self.relocalization
         self.tracker = tracker
+        self.geometry_conflict = None
+        self.geometry_conflict_frames = 0
         if corridor and self.state in self.ENTRY_STATES:
             self.entry_phase = "WALL_CONFIRM"
         self.relocalization = None
@@ -320,6 +325,8 @@ class TraditionalPatrolController:
         self.centre_limit_confirm = 0
         self.entry_phase = "JUNCTION"
         self.relocalization = None
+        self.geometry_conflict = None
+        self.geometry_conflict_frames = 0
         if clear_tracker:
             self.tracker = None
         return np.zeros(2)
@@ -335,7 +342,7 @@ class TraditionalPatrolController:
         return output
 
     def stop_for_obstacle(self, command, features):
-        """Stop first. Only possible body contact remains a latched failure.
+        """Stop first; persistent recovery holds body contact without retreat.
 
         Also called by the ROS adapter on genuine returns in a partially bad
         scan. Such a scan can stop us, but cannot authorize retreat/resumption.
@@ -345,7 +352,7 @@ class TraditionalPatrolController:
         details = self._clearance_details(command, features)
         self.diagnostics.update(details)
         guards = {hit["guard"] for hit in details["clearance_hits"]}
-        if "footprint" in guards:
+        if "footprint" in guards and not self.cfg.persistent_recovery:
             return self.fail("obstacle_clearance")
         if self.obstacle is None:
             self.obstacle = dict(phase="STOP", command=tuple(map(float, command)),
@@ -360,6 +367,10 @@ class TraditionalPatrolController:
             self.confirm = self.centre_limit_confirm = 0
         elif self.obstacle["phase"] == "RETREAT":
             self.obstacle.update(phase="WAIT", reason="retreat_obstructed", attempted=True)
+        if "footprint" in guards:
+            # Contact evidence permits waiting only, never an automatic escape.
+            self.obstacle.update(phase="WAIT", attempted=True, clear_frames=0,
+                                 ready_frames=0, end_frames=0, reason="footprint_wait")
         return np.zeros(2)
 
     def _obstacle_command(self, features, stamp, *, allow_retreat):
@@ -538,12 +549,20 @@ class TraditionalPatrolController:
                 "footprint_half_width_m": cfg.half_width + cfg.collision_margin,
                 "clearance_hits": hits}
 
+    def _detect_geometry(self, features, scale):
+        record = {}
+        geometry = junction_geometry(features, replace(
+            self.cfg, junction_fit_radius=scale*self.cfg.junction_fit_radius), diagnostics=record)
+        record["scan_stamp"] = self.last_stamp
+        self.geometry_diagnostics.append(record)
+        self.geometry_diagnostics = self.geometry_diagnostics[-3:]
+        return geometry
+
     def _geometry(self, features):
         # Rail sampling changes abruptly at an opening edge. Tighter windows
         # retain the same four-gap validation without farther pen interiors.
         for scale in (1.0, .8, .65):
-            geometry = junction_geometry(features, replace(
-                self.cfg, junction_fit_radius=scale * self.cfg.junction_fit_radius))
+            geometry = self._detect_geometry(features, scale)
             if geometry is not None:
                 self.diagnostics["geometry_source"] = "four_openings"
                 return geometry
@@ -582,12 +601,27 @@ class TraditionalPatrolController:
         gaps remain failures and cannot be repaired by changing geometry source.
         """
         if self.tracker.update(geometry, stamp):
+            self.geometry_conflict = None
+            self.geometry_conflict_frames = 0
             return geometry
         reason = self.tracker.failure
         rejected = dict(self.tracker.update_diagnostics, reason=reason)
         self.diagnostics["rejected_geometry"] = rejected
         if (self.diagnostics.get("geometry_source") == "four_openings" and
                 reason in ("junction_position_jump", "junction_axis_jump")):
+            # A stable alternative contradicting the acquired centre is a
+            # reason to STOP and independently reacquire, not to widen the
+            # tracking limit or silently switch a moving robot's landmark.
+            if self.geometry_conflict is None or not self.geometry_conflict.update(geometry, stamp):
+                self.geometry_conflict = JunctionTracker(
+                    geometry, stamp, self.cfg, heading_hint=self.tracker.incoming_axis)
+                self.geometry_conflict_frames = 1
+            else:
+                self.geometry_conflict_frames += 1
+            self.diagnostics["geometry_conflict_frames"] = self.geometry_conflict_frames
+            if self.geometry_conflict_frames >= self.cfg.confirm_frames:
+                self.fail("junction_geometry_conflict")
+                return None
             fallback = self.tracker.observe_walls(features)
             if fallback is not None:
                 if self.tracker.update(fallback, stamp):
@@ -689,6 +723,11 @@ class TraditionalPatrolController:
                                          end_frames=0, reason="repeated_scan_stamp")
                 return np.zeros(2)
             if stamp - self.last_stamp > self.cfg.junction_tracking_max_gap:
+                if self.cfg.persistent_recovery:
+                    if self.state_stamp is not None:
+                        self.state_stamp += stamp - self.last_stamp
+                    self.last_stamp = stamp
+                    self.tracker = None
                 return self.fail("scan_gap")
         previous_stamp = self.last_stamp
         self.last_stamp = stamp

@@ -4,11 +4,14 @@ import math
 from pathlib import Path
 import sys
 import unittest
+import json
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from junction_localization import JunctionTracker
+from junction_localization import JunctionTracker, JunctionGeometry, junction_geometry
 from lidar_patrol_controller import TraditionalPatrolController
 from navigation import load_config, scan_features
 from lidar_scene import StaticLidarScene
@@ -51,6 +54,47 @@ class JunctionTrackingTests(unittest.TestCase):
             self.assertTrue(tracker.update(geometry, i / 12), tracker.failure)
             self.assertLess(abs(geometry.centre[0] - (.584 - .01 * i)), .025)
             self.assertLess(abs(geometry.centre[1]), .025)
+
+    def test_gazebo_occupied_opening_is_rejected_without_losing_real_crossing(self):
+        fixture = Path(__file__).parent/"fixtures/junction_occupied_opening.npz"
+        with np.load(fixture, allow_pickle=False) as data:
+            geometry = json.loads(str(data["scan_geometry"]))
+            for ranges, false in zip(data["ranges"], data["false_opening"]):
+                f = scan_features(SimpleNamespace(ranges=ranges, **geometry), self.cfg)
+                c = TraditionalPatrolController(self.cfg)
+                selected = c._geometry(f)
+                if false:
+                    self.assertIsNone(selected)
+                    self.assertTrue(any(d["rejected"].get("occupied_opening")
+                                        for d in c.geometry_diagnostics))
+                else:
+                    self.assertIsNotNone(selected)
+                    self.assertIn("line_pairs", selected.evidence)
+
+    def test_stable_conflicting_centre_stops_then_reacquires_without_switching_in_motion(self):
+        features = self.features((0., -6.18, math.pi/2))
+        actual = junction_geometry(features, self.cfg)
+        wrong = JunctionGeometry(actual.centre+np.array([.9, 0]), actual.axes,
+                                 actual.confidence, actual.widths)
+        c = TraditionalPatrolController(self.cfg)
+        c.state = "CENTER"
+        c.tracker = JunctionTracker(wrong, 0., self.cfg)
+        with patch.object(c.tracker, "observe_walls", return_value=wrong):
+            for i in range(1, self.cfg.confirm_frames+1):
+                c.last_stamp = i*.1
+                c.diagnostics["geometry_source"] = "four_openings"
+                result = c._track_geometry(actual, features, i*.1)
+        self.assertIsNone(result)
+        self.assertEqual(c.relocalization["reason"], "junction_geometry_conflict")
+        np.testing.assert_allclose(c.tracker.geometry.centre, wrong.centre)
+        self.assertEqual(c.state, "CENTER")
+        self.assertEqual((c.junctions_done, c.endpoints_reached), (0, 0))
+        self.assertEqual(c.cfg.junction_tracking_max_translation, .25)
+        with patch.object(c, "_fresh_junction_geometry", return_value=actual):
+            for i in range(self.cfg.confirm_frames):
+                np.testing.assert_array_equal(c._relocalization_command(features, 1+i*.1), [0, 0])
+        self.assertIsNone(c.relocalization)
+        np.testing.assert_allclose(c.tracker.geometry.centre, actual.centre)
 
     def test_missing_wall_preserves_axis_identity_through_turn(self):
         tracker = self.acquire((0., -6.18, math.pi / 2))
